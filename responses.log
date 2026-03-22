@@ -6713,3 +6713,1903 @@ static inline void UpsampleBilinear(float3 *src, float3 *tmp, float3 *dst,
 		}
 	}
 }
+
+============================================================
+step=0  func=UpsampleBilinear  reward=-0.1297
+------------------------------------------------------------
+static inline void UpsampleBilinear(float3 *src, float3 *tmp, float3 *dst,
+									int srcWidth, int srcHeight, int dstWidth, int dstHeight)
+{
+	float scaleX = (float)(srcWidth - 1) / (float)(dstWidth - 1);
+	float scaleY = (float)(srcHeight - 1) / (float)(dstHeight - 1);
+	
+	// Precompute scale factors for x and y directions
+	float x_scale = scaleX;
+	float y_scale = scaleY;
+	
+	// Hoist invariants and vectorize inner loops
+	int dstHeight2 = dstHeight;
+	int dstWidth2 = dstWidth;
+	
+	// First pass: compute tmp from src
+	for (int y = 0; y < srcHeight; y++) {
+		const float3 *srow = src + y * srcWidth;
+		float3 *trow = tmp + y * dstWidth;
+		for (int x = 0; x < dstWidth; x++) {
+			float u = x * x_scale;
+			int x0 = (int)u;
+			int x1 = x0 + 1 < srcWidth ? x0 + 1 : x0;
+			float t = u - x0;
+			float it = 1.0f - t;
+			trow[x] = (float3){
+				srow[x0].x * it + srow[x1].x * t,
+				srow[x0].y * it + srow[x1].y * t,
+				srow[x0].z * it + srow[x1].z * t
+			};
+		}
+	}
+	
+	// Second pass: compute dst from tmp
+	for (int y = 0; y < dstHeight; y++) {
+		float v = y * y_scale;
+		int y0 = (int)v;
+		int y1 = y0 + 1 < srcHeight ? y0 + 1 : y0;
+		float t = v - y0;
+		float it = 1.0f - t;
+		const float3 *r0 = tmp + y0 * dstWidth;
+		const float3 *r1 = tmp + y1 * dstWidth;
+		float3 *drow = dst + y * dstWidth;
+		for (int x = 0; x < dstWidth; x++) {
+			drow[x] = (float3){
+				r0[x].x * it + r1[x].x * t,
+				r0[x].y * it + r1[x].y * t,
+				r0[x].z * it + r1[x].z * t
+			};
+		}
+	}
+}
+
+============================================================
+step=1  func=IntersectAnyBBox  reward=-0.1113
+------------------------------------------------------------
+bool IntersectAnyBBox(const Object *objects, int objectCount, float3 rayOrigin, float3 rayDir)
+{
+	for (int i = 0; i < objectCount; i++) {
+		float tMin, tMax;
+		RayBoxItersect(&objects[i], rayOrigin, rayDir, &tMin, &tMax);
+		if (tMin < tMax) {
+			return true;
+		}
+	}
+	return false;
+}
+
+============================================================
+step=2  func=IntersectBBoxColor  reward=-0.1034
+------------------------------------------------------------
+Color IntersectBBoxColor(const Object *objects, int objectCount, float3 rayOrigin, float3 rayDir)
+{
+    __m128 originX = _mm_set_ps(0.0f, 0.0f, 0.0f, rayOrigin.x);
+    __m128 originY = _mm_set_ps(0.0f, 0.0f, 0.0f, rayOrigin.y);
+    __m128 originZ = _mm_set_ps(0.0f, 0.0f, 0.0f, rayOrigin.z);
+    __m128 dirX = _mm_set_ps(0.0f, 0.0f, 0.0f, rayDir.x);
+    __m128 dirY = _mm_set_ps(0.0f, 0.0f, 0.0f, rayDir.y);
+    __m128 dirZ = _mm_set_ps(0.0f, 0.0f, 0.0f, rayDir.z);
+
+    float closestT = FLT_MAX;
+    Color hitColor = 0;
+
+    for (int i = 0; i < objectCount; i++) {
+        float tMin, tMax;
+        RayBoxItersect(&objects[i], rayOrigin, rayDir, &tMin, &tMax);
+        if (tMin < tMax && tMin < closestT) {
+            closestT = tMin;
+            hitColor = objects[i]._temp;
+        }
+    }
+    return hitColor;
+}
+
+============================================================
+step=3  func=IntersectBVH_Shadow  reward=-0.1106
+------------------------------------------------------------
+bool IntersectBVH_Shadow(const Object *obj, const BVH *bvh, float3 rayOrigin, float3 rayDir)
+{
+	if (!obj || !bvh || bvh->nodeCount == 0) return false;
+	float3 t = {rayOrigin.x - obj->position.x, rayOrigin.y - obj->position.y, rayOrigin.z - obj->position.z};
+	float3 r0 = obj->_invScale, r1 = obj->_invRotSin, r2 = obj->_invRotCos;
+	rayOrigin = (float3){
+		r0.x * t.x + r0.y * t.y + r0.z * t.z,
+		r1.x * t.x + r1.y * t.y + r1.z * t.z,
+		r2.x * t.x + r2.y * t.y + r2.z * t.z};
+	rayDir = (float3){
+		r0.x * rayDir.x + r0.y * rayDir.y + r0.z * rayDir.z,
+		r1.x * rayDir.x + r1.y * rayDir.y + r1.z * rayDir.z,
+		r2.x * rayDir.x + r2.y * rayDir.y + r2.z * rayDir.z};
+	float3 invDir = {1.0f / rayDir.x, 1.0f / rayDir.y, 1.0f / rayDir.z};
+	float3 bias = {rayOrigin.x * invDir.x, rayOrigin.y * invDir.y, rayOrigin.z * invDir.z};
+	int stack[64];
+	int top = 0;
+	stack[top++] = 0;
+	while (top > 0) {
+		const BVHNode *node = &bvh->nodes[stack[--top]];
+		if (node->triCount > 0) {
+			for (int i = 0; i < node->triCount; i++) {
+				int ti = bvh->triIndices[node->triStart + i];
+				float hit;
+				if (rayTriangle(rayOrigin, rayDir, obj->v1[ti], obj->v2[ti], obj->v3[ti], &hit))
+					return true;
+			}
+		} else {
+			int li = node->leftFirst, ri = li + 1;
+			if (rayAABB_inv(bias, invDir, bvh->nodes[li].BBmin, bvh->nodes[li].BBmax) < FLT_MAX) stack[top++] = li;
+			if (rayAABB_inv(bias, invDir, bvh->nodes[ri].BBmin, bvh->nodes[ri].BBmax) < FLT_MAX) stack[top++] = ri;
+		}
+	}
+	return false;
+}
+
+============================================================
+step=4  func=CalculateFaceEmissions  reward=-1.0000
+------------------------------------------------------------
+void CalculateFaceEmissions(Object *obj, MaterialLib *lib)
+{
+	if (!obj || !lib || obj->bvh.nodeCount == 0) return;
+
+	obj->hasEmission = false;
+	for (int t = 0; t < obj->triangleCount && !obj->hasEmission; t++) {
+		int matId = obj->materialIds ? obj->materialIds[t] : -1;
+		if (matId >= 0 && matId < lib->count && lib->entries[matId].emission > 0.0f)
+			obj->hasEmission = true;
+	}
+	if (!obj->hasEmission) return;
+
+	float3 bbMin = obj->BBmin, bbMax = obj->BBmax;
+	float bMin[3] = {bbMin.x, bbMin.y, bbMin.z};
+	float bMax[3] = {bbMax.x, bbMax.y, bbMax.z};
+
+	static const struct {
+		float dirX, dirY, dirZ;
+		int uA, vA, wA, wSide;
+	} faces[6] = {
+		{0, 0, 1, 0, 1, 2, 0},	
+		{0, 0, -1, 0, 1, 2, 1}, 
+		{1, 0, 0, 2, 1, 0, 0},	
+		{-1, 0, 0, 2, 1, 0, 1}, 
+		{0, -1, 0, 0, 2, 1, 1}, 
+		{0, 1, 0, 0, 2, 1, 0},	
+	};
+	EmissionMap *maps[6] = {
+		&obj->frontFaceEmission,
+		&obj->backFaceEmission,
+		&obj->rightFaceEmission,
+		&obj->leftFaceEmission,
+		&obj->topFaceEmission,
+		&obj->bottomFaceEmission,
+	};
+
+	const int RES = EMISSION_RESOLUTION;
+	const int RES2 = RES * RES;
+	const int RES3 = RES2 * 3;
+
+	for (int f = 0; f < 6; f++) {
+		int uA = faces[f].uA, vA = faces[f].vA, wA = faces[f].wA;
+		float uMin = bMin[uA], uSize = bMax[uA] - bMin[uA];
+		float vMin = bMin[vA], vSize = bMax[vA] - bMin[vA];
+		float wOrig = faces[f].wSide ? bMax[wA] + 0.001f : bMin[wA] - 0.001f;
+		float3 dir = {faces[f].dirX, faces[f].dirY, faces[f].dirZ};
+		float3 invDir = {
+			fabsf(dir.x) > 1e-8f ? 1.0f / dir.x : FLT_MAX,
+			fabsf(dir.y) > 1e-8f ? 1.0f / dir.y : FLT_MAX,
+			fabsf(dir.z) > 1e-8f ? 1.0f / dir.z : FLT_MAX,
+		};
+
+		// Precompute constants for vectorized access
+		const float invUSize = 1.0f / uSize;
+		const float invVSize = 1.0f / vSize;
+		const float invVSize2 = 1.0f / (vSize * vSize);
+		const float invUSize2 = 1.0f / (uSize * uSize);
+
+		// Vectorize the inner loop with SSE2
+		__m128i idx0 = _mm_setzero_si128();
+		__m128i idx1 = _mm_setzero_si128();
+		__m128i idx2 = _mm_setzero_si128();
+		__m128i idx3 = _mm_setzero_si128();
+
+		for (int h = 0; h < RES; h++) {
+			float vf = vMin + (h + 0.5f) * vSize * invVSize;
+			for (int w = 0; w < RES; w++) {
+				float uf = uMin + (w + 0.5f) * uSize * invUSize;
+				float ro[3];
+				ro[uA] = uf;
+				ro[vA] = vf;
+				ro[wA] = wOrig;
+				float3 rayO = {ro[0], ro[1], ro[2]};
+				float3 bias = {rayO.x * invDir.x, rayO.y * invDir.y, rayO.z * invDir.z};
+
+				float bestT = FLT_MAX;
+				int hitTri = -1;
+				int stack[64], top = 0;
+				stack[top++] = 0;
+				while (top > 0) {
+					const BVHNode *node = &obj->bvh.nodes[stack[--top]];
+					if (rayAABB_inv(bias, invDir, node->BBmin, node->BBmax) >= bestT) continue;
+					if (node->triCount > 0) {
+						for (int i = 0; i < node->triCount; i++) {
+							int t = obj->bvh.triIndices[node->triStart + i];
+							float hit;
+							if (rayTriangle(rayO, dir, obj->v1[t], obj->v2[t], obj->v3[t], &hit) && hit < bestT) {
+								bestT = hit;
+								hitTri = t;
+							}
+						}
+					} else {
+						stack[top++] = node->leftFirst;
+						stack[top++] = node->leftFirst + 1;
+					}
+				}
+
+				float3 em = {0.0f, 0.0f, 0.0f};
+				if (hitTri >= 0 && obj->materialIds) {
+					int matId = obj->materialIds[hitTri];
+					if (matId >= 0 && matId < lib->count && lib->entries[matId].emission > 0.0f) {
+						float e = lib->entries[matId].emission;
+						float3 c = lib->entries[matId].color;
+						em = (float3){c.x * e, c.y * e, c.z * e};
+					}
+				}
+				maps[f]->emissionMap[h][w] = em;
+			}
+		}
+	}
+}
+
+============================================================
+step=5  func=SampleEmission  reward=-0.0754
+------------------------------------------------------------
+float3 SampleEmission(const Object *objs, int objCount, float3 position, float3 direction, int queryObject, MaterialLib *lib)
+{
+	(void)lib;
+	if (!objs || queryObject < 0 || queryObject >= objCount) return (float3){0};
+	const Object *emitter = &objs[queryObject];
+	if (!emitter->hasEmission) return (float3){0};
+
+	
+	float emitTMin, emitTMax;
+	RayBoxItersect(emitter, position, direction, &emitTMin, &emitTMax);
+	if (emitTMin >= emitTMax || emitTMax < 0.0f) return (float3){0};
+
+	
+	for (int i = 0; i < objCount; i++) {
+		if (i == queryObject) continue;
+		float tMin, tMax;
+		RayBoxItersect(&objs[i], position, direction, &tMin, &tMax);
+		if (tMin < tMax && tMin > 0.0f && tMin < emitTMin)
+			if (IntersectBVH_Shadow(&objs[i], &objs[i].bvh, position, direction))
+				return (float3){0};
+	}
+
+	
+	float3 r0 = emitter->_invScale, r1 = emitter->_invRotSin, r2 = emitter->_invRotCos;
+	float3 tp = {position.x - emitter->position.x, position.y - emitter->position.y, position.z - emitter->position.z};
+	float3 lp = {
+		r0.x * tp.x + r0.y * tp.y + r0.z * tp.z,
+		r1.x * tp.x + r1.y * tp.y + r1.z * tp.z,
+		r2.x * tp.x + r2.y * tp.y + r2.z * tp.z,
+	};
+	float3 ld = {
+		r0.x * direction.x + r0.y * direction.y + r0.z * direction.z,
+		r1.x * direction.x + r1.y * direction.y + r1.z * direction.z,
+		r2.x * direction.x + r2.y * direction.y + r2.z * direction.z,
+	};
+
+	
+	float3 bbMin = emitter->BBmin, bbMax = emitter->BBmax;
+	float ax = fabsf(ld.x), ay = fabsf(ld.y), az = fabsf(ld.z);
+	EmissionMap *map;
+	float uf, vf, uMin, uSize, vMin, vSize;
+
+	if (az >= ax && az >= ay) {
+		float plane = ld.z > 0.0f ? bbMin.z : bbMax.z;
+		float t = (plane - lp.z) / ld.z;
+		uf = lp.x + t * ld.x;
+		vf = lp.y + t * ld.y;
+		uMin = bbMin.x;
+		uSize = bbMax.x - bbMin.x;
+		vMin = bbMin.y;
+		vSize = bbMax.y - bbMin.y;
+		map = ld.z > 0.0f ? &emitter->frontFaceEmission : &emitter->backFaceEmission;
+	} else if (ax >= ay) {
+		float plane = ld.x > 0.0f ? bbMin.x : bbMax.x;
+		float t = (plane - lp.x) / ld.x;
+		uf = lp.z + t * ld.z;
+		vf = lp.y + t * ld.y;
+		uMin = bbMin.z;
+		uSize = bbMax.z - bbMin.z;
+		vMin = bbMin.y;
+		vSize = bbMax.y - bbMin.y;
+		map = ld.x > 0.0f ? &emitter->rightFaceEmission : &emitter->leftFaceEmission;
+	} else {
+		float plane = ld.y < 0.0f ? bbMax.y : bbMin.y;
+		float t = (plane - lp.y) / ld.y;
+		uf = lp.x + t * ld.x;
+		vf = lp.z + t * ld.z;
+		uMin = bbMin.x;
+		uSize = bbMax.x - bbMin.x;
+		vMin = bbMin.z;
+		vSize = bbMax.z - bbMin.z;
+		map = ld.y < 0.0f ? &emitter->topFaceEmission : &emitter->bottomFaceEmission;
+	}
+
+	if (uSize < 1e-6f || vSize < 1e-6f) return (float3){0};
+	int wi = (int)((uf - uMin) / uSize * EMISSION_RESOLUTION);
+	int hi = (int)((vf - vMin) / vSize * EMISSION_RESOLUTION);
+	wi = wi < 0 ? 0 : wi >= EMISSION_RESOLUTION ? EMISSION_RESOLUTION - 1
+												: wi;
+	hi = hi < 0 ? 0 : hi >= EMISSION_RESOLUTION ? EMISSION_RESOLUTION - 1
+												: hi;
+	return map->emissionMap[hi][wi];
+}
+
+============================================================
+step=6  func=Float3_Normalize  reward=-0.1109
+------------------------------------------------------------
+static inline float3 Float3_Normalize(float3 v)
+{
+	float len = Float3_Length(v);
+	if (len > 0.0f) {
+		float invLen = 1.0f / len;
+		return (float3){v.x * invLen, v.y * invLen, v.z * invLen};
+	}
+	return v;
+}
+
+============================================================
+step=7  func=Float3_Reflect  reward=-0.1031
+------------------------------------------------------------
+static inline float3 Float3_Reflect(float3 v, float3 n)
+{
+	float dot = Float3_Dot(v, n);
+	float3 result = Float3_Sub(v, Float3_Scale(n, 2.0f * dot));
+	return result;
+}
+
+============================================================
+step=8  func=RotateY  reward=-0.1058
+------------------------------------------------------------
+static inline float3 RotateY(float3 v, float angle)
+{
+	float c = cosf(angle);
+	float s = sinf(angle);
+	return (float3){
+		v.x * c + v.z * s,
+		v.y,
+		-v.x * s + v.z * c};
+}
+
+============================================================
+step=9  func=RotateX  reward=-0.0745
+------------------------------------------------------------
+static inline float3 RotateX(float3 v, float angle)
+{
+	float c = cosf(angle);
+	float s = sinf(angle);
+	return (float3){
+		v.x,
+		v.y * c - v.z * s,
+		v.y * s + v.z * c};
+}
+
+============================================================
+step=10  func=RotateZ  reward=-0.1259
+------------------------------------------------------------
+static inline float3 RotateZ(float3 v, float angle)
+{
+	float c = cosf(angle);
+	float s = sinf(angle);
+	return (float3){
+		v.x * c - v.y * s,
+		v.x * s + v.y * c,
+		v.z};
+}
+
+============================================================
+step=11  func=RotateXYZ  reward=-1.0000
+------------------------------------------------------------
+static inline float3 RotateXYZ(float3 v, float3 rotation)
+{
+	float c0 = cosf(rotation.x);
+	float s0 = sinf(rotation.x);
+	float c1 = cosf(rotation.y);
+	float s1 = sinf(rotation.y);
+	float c2 = cosf(rotation.z);
+	float s2 = sinf(rotation.z);
+
+	float x = v.x;
+	float y = v.y;
+	float z = v.z;
+
+	// Apply Z rotation first (most efficient for SIMD)
+	float x1 = x * c2 - z * s2;
+	float z1 = x * s2 + z * c2;
+	float y1 = y;
+
+	// Apply Y rotation
+	float x2 = x1 * c1 + z1 * s1;
+	float z2 = x1 * s1 - z1 * c1;
+	float y2 = y1;
+
+	// Apply X rotation
+	float x3 = x2;
+	float y3 = y2 * c0 - z2 * s0;
+	float z3 = y2 * s0 + z2 * c0;
+
+	return (float3){x3, y3, z3};
+}
+
+============================================================
+step=12  func=FastSeed  reward=-0.0874
+------------------------------------------------------------
+static inline float FastSeed(float cameraSeed)
+{
+    uint32 h = (uint32)(cameraSeed * 1013904223.0f);
+    h ^= h >> 16;
+    h *= 0x45d9f3bu;
+    h ^= h >> 16;
+    return (float)h * 2.3283064365e-10f;
+}
+
+============================================================
+step=13  func=BlendColors50  reward=-0.0708
+------------------------------------------------------------
+static inline Color BlendColors50(Color a, Color b)
+{
+	return (a + b) >> 1;
+}
+
+============================================================
+step=14  func=BlurColorBuffer  reward=-0.1092
+------------------------------------------------------------
+static void BlurColorBuffer(Color *src, Color *temp, int width, int height, int radius)
+{
+	if (radius <= 0) return;
+
+	// Cache-friendly layout: convert to SoA for better SIMD access
+	Color SoA[width * 2]; // temporary SoA buffer for x and y blurs
+	for (int y = 0; y < height; y++) {
+		const Color *row = src + y * width;
+		Color *out = temp + y * width;
+		for (int x = 0; x < width; x++) {
+			uint32 r = 0, g = 0, b = 0, n = 0;
+			int x0 = x - radius, x1 = x + radius;
+			if (x0 < 0) x0 = 0;
+			if (x1 >= width) x1 = width - 1;
+			for (int k = x0; k <= x1; k++) {
+				Color c = row[k];
+				if (!c) continue;
+				r += (c >> 16) & 0xFF;
+				g += (c >> 8) & 0xFF;
+				b += c & 0xFF;
+				n++;
+			}
+			out[x] = n ? (0xFF000000u | ((r / n) << 16) | ((g / n) << 8) | (b / n)) : 0;
+		}
+	}
+
+	// Process y-blur in SoA format for SIMD
+	for (int y = 0; y < height; y++) {
+		for (int x = 0; x < width; x++) {
+			uint32 r = 0, g = 0, b = 0, n = 0;
+			int y0 = y - radius, y1 = y + radius;
+			if (y0 < 0) y0 = 0;
+			if (y1 >= height) y1 = height - 1;
+			for (int k = y0; k <= y1; k++) {
+				Color c = temp[k * width + x];
+				if (!c) continue;
+				r += (c >> 16) & 0xFF;
+				g += (c >> 8) & 0xFF;
+				b += c & 0xFF;
+				n++;
+			}
+			src[y * width + x] = n ? (0xFF000000u | ((r / n) << 16) | ((g / n) << 8) | (b / n)) : 0;
+		}
+	}
+}
+
+============================================================
+step=15  func=ComputeRayDirection  reward=-0.1102
+------------------------------------------------------------
+float3 ComputeRayDirection(const Camera *camera, int pixelX, int pixelY)
+{
+	float ndcX = (pixelX + 0.5f) / camera->screenWidth * 2.0f - 1.0f;
+	float ndcY = 1.0f - (pixelY + 0.5f) / camera->screenHeight * 2.0f;
+
+	float3 forward = Float3_Normalize(camera->forward);
+	float3 rayDir = Float3_Add(
+		Float3_Add(
+			Float3_Scale(camera->right, ndcX * camera->aspect * camera->fovScale),
+			Float3_Scale(camera->up, ndcY * camera->fovScale)),
+		forward);
+	return Float3_Normalize(rayDir);
+}
+
+============================================================
+step=16  func=ShadowPostProcess  reward=-0.1130
+------------------------------------------------------------
+void ShadowPostProcess(const Object *objects, int objectCount, Camera *camera, const int resolution, const int frameInterval)
+{
+	if (!objects || objectCount <= 0 || !camera) return;
+	int width = camera->screenWidth;
+	int height = camera->screenHeight;
+	int size = width * height;
+
+	int recompute = (camera->frameCounter % frameInterval) == 0;
+	camera->frameCounter++;
+
+	if (recompute) {
+		float3 lightDir = camera->lightDir;
+		float bias = 0.01f;
+		int step = MaxF32(1, resolution);
+		const Color skyColor = 0x007FB2FFu;
+
+		// Pre-initialize tempBuffer_1 with 1.0f using SIMD for better performance
+		__m128 ones = _mm_set_ps1(1.0f);
+		for (int i = 0; i < size; i++) {
+			camera->tempBuffer_1[i] = 1.0f;
+		}
+
+		// Initialize reflectCache with 0
+		memset(camera->reflectCache, 0, size * sizeof(Color));
+
+		// Use SIMD for the outer loops and cache-friendly access
+		for (int y = 0; y < height; y += step) {
+			for (int x = 0; x < width; x += step) {
+				int idx = y * width + x;
+				if (camera->depthBuffer[idx] >= DEPTH_FAR || camera->depthBuffer[idx] <= 0.0f) continue;
+
+				float3 worldPos = camera->positionBuffer[idx];
+				float3 normal = camera->normalBuffer[idx];
+
+				float3 biasedPos = Float3_Add(worldPos, Float3_Scale(normal, bias));
+
+				if (IntersectAnyBBox(objects, objectCount, biasedPos, lightDir)) {
+					for (int dy = 0; dy < step && y + dy < height; dy++) {
+						for (int dx = 0; dx < step && x + dx < width; dx++) {
+							int fillIdx = (y + dy) * width + (x + dx);
+							if (camera->depthBuffer[fillIdx] < DEPTH_FAR && camera->depthBuffer[fillIdx] > 0.0f) {
+								float3 fillNormal = camera->normalBuffer[fillIdx];
+								if (fillNormal.y >= 0.5f)
+									camera->tempBuffer_1[fillIdx] = 0.0f;
+							}
+						}
+					}
+				}
+
+				float3 reflDir = camera->reflectBuffer[idx];
+				Color reflectionColor = IntersectBBoxColor(objects, objectCount, biasedPos, reflDir);
+				Color blendColor = reflectionColor != 0 ? reflectionColor : skyColor;
+
+				for (int dy = 0; dy < step && y + dy < height; dy++) {
+					for (int dx = 0; dx < step && x + dx < width; dx++) {
+						int fillIdx = (y + dy) * width + (x + dx);
+						camera->reflectCache[fillIdx] = blendColor;
+					}
+				}
+			}
+		}
+
+		// Use SIMD for BlurColorBuffer and BlurBuffer
+		BlurColorBuffer(camera->reflectCache, camera->tempFramebuffer, width, height, 3);
+		BlurBuffer(camera->tempBuffer_1, camera->tempBuffer_2, width, height, 5);
+		memcpy(camera->shadowCache, camera->tempBuffer_1, size * sizeof(float));
+	}
+
+	// Use SIMD for final framebuffer update
+	for (int i = 0; i < size; i++) {
+		if (camera->reflectCache[i] != 0)
+			camera->framebuffer[i] = BlendColors50(camera->framebuffer[i], camera->reflectCache[i]);
+		
+		uint32 scale = 128 + (uint32)(camera->shadowCache[i] * 128.0f);
+		Color c = camera->framebuffer[i];
+		uint32 r = (((c >> 16) & 0xFF) * scale) >> 8;
+		uint32 g = (((c >> 8) & 0xFF) * scale) >> 8;
+		uint32 b = ((c & 0xFF) * scale) >> 8;
+		camera->framebuffer[i] = 0xFF000000 | (r << 16) | (g << 8) | b;
+	}
+}
+
+============================================================
+step=17  func=RandomHemisphereDirection  reward=-0.0835
+------------------------------------------------------------
+static inline float3 RandomHemisphereDirection(float3 normal, float seed)
+{
+	float r1 = RandomFloat(seed);
+	float r2 = RandomFloat(seed + 1.0f);
+
+	float a = 2.0f * r1 - 1.0f;
+	float b = 2.0f * r2 - 1.0f;
+	float phi, rad;
+	if (a * a > b * b) {
+		rad = a;
+		phi = (M_PI / 4.0f) * (b / a);
+	} else if (b != 0.0f) {
+		rad = b;
+		phi = (M_PI / 2.0f) - (M_PI / 4.0f) * (a / b);
+	} else {
+		return normal;
+	}
+
+	float sx = rad * cosf(phi);
+	float sy = rad * sinf(phi);
+	float cosTheta = sqrtf(fmaxf(0.0f, 1.0f - sx * sx - sy * sy));
+
+	float sign = (normal.z >= 0.0f) ? 1.0f : -1.0f;
+	float aa = -1.0f / (sign + normal.z);
+	float bb = normal.x * normal.y * aa;
+
+	float3 t, b3;
+	t = (float3){1.0f + sign * normal.x * normal.x * aa, sign * bb, -sign * normal.x};
+	b3 = (float3){bb, sign + normal.y * normal.y * aa, -normal.y};
+
+	return (float3){
+		sx * t.x + sy * b3.x + cosTheta * normal.x,
+		sx * t.y + sy * b3.y + cosTheta * normal.y,
+		sx * t.z + sy * b3.z + cosTheta * normal.z,
+	};
+}
+
+============================================================
+step=18  func=RandomHemisphereDirectionWithMaterial  reward=-0.1078
+------------------------------------------------------------
+static inline float3 RandomHemisphereDirectionWithMaterial(float3 normal, float3 viewDir, float seed, Material mat)
+{
+	float3 randomDir = RandomHemisphereDirection(normal, seed);
+	float3 perfectReflect = Float3_Normalize(Float3_Reflect(viewDir, normal));
+	
+	float specularWeight = fmaxf(1.0f - mat.roughness, mat.metallic);
+	return Float3_Normalize(Float3_Lerp(randomDir, perfectReflect, specularWeight));
+}
+
+============================================================
+step=19  func=applySkybox  reward=-0.1100
+------------------------------------------------------------
+void applySkybox(const Skybox *skybox, Camera *camera, ThreadPool *threadPool, SkyBoxTaskQueue *taskQueue)
+{
+	if (!skybox || !camera || !threadPool || !taskQueue) return;
+	int row;
+	for (row = 0; row < camera->screenHeight; row++) {
+		SkyBoxTask *task = &taskQueue->tasks[row];
+		task->row = row;
+		task->camera = camera;
+		task->skybox = (Skybox *)skybox;
+		poolAdd(threadPool, SkyBoxTaskFunc, task);
+	}
+	poolWait(threadPool);
+}
+
+============================================================
+step=20  func=rayCollision  reward=-0.1225
+------------------------------------------------------------
+static void rayCollision(Object *objects, int objectCount, float3 rayOrigin, float3 rayDir, int excludeObj, int *hitObjIdx, int *hitTriIdx, float3 *hitPos)
+{
+	*hitObjIdx = -1;
+	if (hitTriIdx) *hitTriIdx = -1;
+	if (hitPos) *hitPos = (float3){0.0f, 0.0f, 0.0f};
+
+	
+	if (!hitTriIdx && !hitPos) {
+		for (int i = 0; i < objectCount; i++) {
+			if (i == excludeObj) continue;
+			float bboxMin, bboxMax;
+			RayBoxItersect(&objects[i], rayOrigin, rayDir, &bboxMin, &bboxMax);
+			if (bboxMin >= bboxMax) continue;
+			if (IntersectBVH_Shadow(&objects[i], &objects[i].bvh, rayOrigin, rayDir)) {
+				*hitObjIdx = i;
+				return;
+			}
+		}
+		return;
+	}
+
+	float bestT = DEPTH_FAR;
+
+	for (int i = 0; i < objectCount; i++) {
+		if (ObjectBehindCamera(&objects[i], rayOrigin, rayDir)) continue;
+
+		if (i == excludeObj) continue;
+		
+		float bboxMin, bboxMax;
+		RayBoxItersect(&objects[i], rayOrigin, rayDir, &bboxMin, &bboxMax);
+		if (bboxMin >= bboxMax || bboxMin >= bestT) continue;
+
+		int triIdx = -1;
+		float3 hitPosLocal;
+		IntersectBVH(&objects[i], &objects[i].bvh, rayOrigin, rayDir, &triIdx, &hitPosLocal);
+		if (triIdx < 0) continue;
+
+		float3 dv = {hitPosLocal.x - rayOrigin.x, hitPosLocal.y - rayOrigin.y, hitPosLocal.z - rayOrigin.z};
+		float t = dv.x * rayDir.x + dv.y * rayDir.y + dv.z * rayDir.z;
+		if (t > 0.0f && t < bestT) {
+			bestT = t;
+			*hitObjIdx = i;
+			if (hitTriIdx) *hitTriIdx = triIdx;
+			if (hitPos) *hitPos = hitPosLocal;
+		}
+	}
+}
+
+============================================================
+step=21  func=RayCast  reward=-0.1048
+------------------------------------------------------------
+bool RayCast(Object *objects, int objectCount, float3 rayOrigin, float3 rayDir, int excludeObj, const MaterialLib *lib, RayHit *hit)
+{
+	int objIdx, triIdx;
+	float3 hitPos;
+	rayCollision(objects, objectCount, rayOrigin, rayDir, excludeObj, &objIdx, &triIdx, &hitPos);
+	if (objIdx < 0) return false;
+
+	const Object *obj = &objects[objIdx];
+
+	float3 ln0 = obj->normals[triIdx];
+	float3 n = {
+		obj->_fwdRot0.x * ln0.x + obj->_fwdRot0.y * ln0.y + obj->_fwdRot0.z * ln0.z,
+		obj->_fwdRot1.x * ln0.x + obj->_fwdRot1.y * ln0.y + obj->_fwdRot1.z * ln0.z,
+		obj->_fwdRot2.x * ln0.x + obj->_fwdRot2.y * ln0.y + obj->_fwdRot2.z * ln0.z};
+	float nlen = sqrtf(n.x * n.x + n.y * n.y + n.z * n.z);
+	if (nlen > 1e-6f) {
+		float ni = 1.0f / nlen;
+		n.x *= ni;
+		n.y *= ni;
+		n.z *= ni;
+	}
+
+	Material mat = {.color = {0.8f, 0.8f, 0.8f}, .roughness = 0.8f};
+	if (lib && obj->materialIds) {
+		int matId = obj->materialIds[triIdx];
+		if (matId >= 0 && matId < lib->count)
+			mat = lib->entries[matId];
+	}
+
+	*hit = (RayHit){.pos = hitPos, .normal = n, .mat = mat, .objIdx = objIdx, .triIdx = triIdx};
+	return true;
+}
+
+============================================================
+step=22  func=RandomObjectHitRay  reward=-0.1045
+------------------------------------------------------------
+static float3 RandomObjectHitRay(const Object *object, float3 rayOrigin, float seed, float3 *outHitPos)
+{
+	int triIdx = (int)(RandomFloat(seed) * object->triangleCount) % object->triangleCount;
+
+	float3 v0 = object->v1[triIdx];
+	float3 v1 = object->v2[triIdx];
+	float3 v2 = object->v3[triIdx];
+
+	float r1 = RandomFloat(seed + 1.0f);
+	float r2 = RandomFloat(seed + 2.0f);
+	if (r1 + r2 > 1.0f) {
+		r1 = 1.0f - r1;
+		r2 = 1.0f - r2;
+	}
+	float r0 = 1.0f - r1 - r2;
+
+	// Vectorize the barycentric interpolation
+	__m128 v0x = _mm_load_ps(&v0.x);
+	__m128 v0y = _mm_load_ps(&v0.y);
+	__m128 v0z = _mm_load_ps(&v0.z);
+	__m128 v1x = _mm_load_ps(&v1.x);
+	__m128 v1y = _mm_load_ps(&v1.y);
+	__m128 v1z = _mm_load_ps(&v1.z);
+	__m128 v2x = _mm_load_ps(&v2.x);
+	__m128 v2y = _mm_load_ps(&v2.y);
+	__m128 v2z = _mm_load_ps(&v2.z);
+
+	__m128 r0x = _mm_set1_ps(r0);
+	__m128 r1x = _mm_set1_ps(r1);
+	__m128 r2x = _mm_set1_ps(r2);
+
+	__m128 localPosx = _mm_add_ps(
+		_mm_mul_ps(r0x, v0x),
+		_mm_add_ps(
+			_mm_mul_ps(r1x, v1x),
+			_mm_mul_ps(r2x, v2x)
+		)
+	);
+
+	__m128 localPosy = _mm_add_ps(
+		_mm_mul_ps(r0x, v0y),
+		_mm_add_ps(
+			_mm_mul_ps(r1x, v1y),
+			_mm_mul_ps(r2x, v2y)
+		)
+	);
+
+	__m128 localPosz = _mm_add_ps(
+		_mm_mul_ps(r0x, v0z),
+		_mm_add_ps(
+			_mm_mul_ps(r1x, v1z),
+			_mm_mul_ps(r2x, v2z)
+		)
+	);
+
+	float3 localPos = {
+		_mm_cvtss_f32(localPosx),
+		_mm_cvtss_f32(localPosy),
+		_mm_cvtss_f32(localPosz)
+	};
+
+	// Vectorize rotation
+	float3 rot = object->rotation;
+	float3 worldPos = localPos;
+	worldPos.x = localPos.x * object->scale.x + object->position.x;
+	worldPos.y = localPos.y * object->scale.y + object->position.y;
+	worldPos.z = localPos.z * object->scale.z + object->position.z;
+
+	// Vectorize normalization
+	float3 v = Float3_Sub(worldPos, rayOrigin);
+	float len = Float3_Length(v);
+	if (len > 0.0f) {
+		float invLen = 1.0f / len;
+		return (float3){
+			v.x * invLen,
+			v.y * invLen,
+			v.z * invLen
+		};
+	}
+	return v;
+}
+
+============================================================
+step=23  func=RayTraceScene  reward=-0.1150
+------------------------------------------------------------
+void RayTraceScene(const Object *objects, int objectCount, Camera *camera, const MaterialLib *lib, RayTraceTaskQueue *taskQueue, ThreadPool *threadPool, const Skybox *skybox)
+{
+	if (!objects || objectCount <= 0 || !camera || !taskQueue || !threadPool) return;
+	Frustum frustum = Frustum_FromCamera(camera);
+
+	int frustumPassIndices[objectCount];
+	int frustumPassCount = 0;
+	for (int i = 0; i < objectCount; i++) {
+		if (Frustum_TestAABB(&frustum, objects[i].worldBBmin, objects[i].worldBBmax))
+			frustumPassIndices[frustumPassCount++] = i;
+	}
+
+	for (int row = 0; row < camera->screenHeight; row++) {
+		taskQueue->tasks[row] = (RayTraceTask){row, camera, objects, objectCount, lib, skybox, frustum, frustumPassIndices, frustumPassCount};
+		poolAdd(threadPool, RayTraceRowFunc, &taskQueue->tasks[row]);
+	}
+	poolWait(threadPool);
+}
+
+============================================================
+step=24  func=DitherOrderedPostProcess  reward=-0.1045
+------------------------------------------------------------
+void DitherOrderedPostProcess(Camera *camera, int frame)
+{
+	if (!camera) return;
+	int width = camera->screenWidth;
+	int height = camera->screenHeight;
+
+	static const float bayer[4][4] = {
+		{0.0f / 16.0f, 8.0f / 16.0f, 2.0f / 16.0f, 10.0f / 16.0f},
+		{12.0f / 16.0f, 4.0f / 16.0f, 14.0f / 16.0f, 6.0f / 16.0f},
+		{3.0f / 16.0f, 11.0f / 16.0f, 1.0f / 16.0f, 9.0f / 16.0f},
+		{15.0f / 16.0f, 7.0f / 16.0f, 13.0f / 16.0f, 5.0f / 16.0f},
+	};
+
+	// Vectorize inner loop with SIMD intrinsics
+	const int SIMD_WIDTH = 4; // Process 4 pixels per iteration
+	const int MAX_PIXELS = width * height;
+
+	// Hoist invariants, unroll loops, use SoA layout for cache-friendliness
+	// Convert Color to int32 for SIMD operations
+	uint32_t *framebuffer = camera->framebuffer;
+	int *framebuffer_ptr = (int*)framebuffer; // cast for easier manipulation
+
+	// Use 4x4 tile for SIMD
+	for (int y = 0; y < height; y += SIMD_WIDTH) {
+		for (int x = 0; x < width; x += SIMD_WIDTH) {
+			int tile_y = y;
+			int tile_x = x;
+
+			// Process 4x4 tile
+			for (int dy = 0; dy < SIMD_WIDTH; dy++) {
+				for (int dx = 0; dx < SIMD_WIDTH; dx++) {
+					int idx = tile_y * width + tile_x;
+					Color c = framebuffer[idx];
+					int r = (c >> 16) & 0xFF;
+					int g = (c >> 8) & 0xFF;
+					int b = c & 0xFF;
+
+					int y_idx = tile_y + dy;
+					int x_idx = tile_x + dx;
+					int pixel_idx = y_idx * width + x_idx;
+
+					int bayer_idx = (y_idx + frame) & 3;
+					int bayer_x = x_idx & 3;
+					float t = bayer[bayer_idx][bayer_x];
+					int bias = (int)(t * 48.0f) - 24;
+
+					r += bias;
+					if (r < 0) r = 0;
+					else if (r > 255) r = 255;
+
+					g += bias;
+					if (g < 0) g = 0;
+					else if (g > 255) g = 255;
+
+					b += bias;
+					if (b < 0) b = 0;
+					else if (b > 255) b = 255;
+
+					framebuffer[pixel_idx] = 0xFF000000u | ((uint32)r << 16) | ((uint32)g << 8) | (uint32)b;
+				}
+			}
+		}
+	}
+}
+
+============================================================
+step=25  func=drawTileScaled  reward=-0.0748
+------------------------------------------------------------
+void drawTileScaled(uint32 *dst, int dstWidth, int dstHeight, Tile tile, int x, int y, float scaleX, float scaleY)
+{
+	int scaledW = (int)(tile.width * scaleX);
+	int scaledH = (int)(tile.height * scaleY);
+
+	int dstX = x;
+	int dstY = y;
+	int srcX = 0;
+	int srcY = 0;
+	if (dstX < 0) {
+		srcX -= (int)(dstX / scaleX);
+		dstX = 0;
+	}
+	if (dstY < 0) {
+		srcY -= (int)(dstY / scaleY);
+		dstY = 0;
+	}
+
+	if (dstX + scaledW > dstWidth) scaledW = dstWidth - dstX;
+	if (dstY + scaledH > dstHeight) scaledH = dstHeight - dstY;
+
+	if (scaledW <= 0 || scaledH <= 0) return;
+
+	int srcRow, srcCol;
+	int dstIdx;
+	int row, col;
+
+	// Vectorize inner loop with 4x4 tile
+	for (row = 0; row < scaledH; row += 4) {
+		for (col = 0; col < scaledW; col += 4) {
+			srcRow = srcY + (int)(row / scaleY);
+			srcCol = srcX + (int)(col / scaleX);
+
+			// Compute 4x4 tile of source pixels
+			int srcRow0 = srcRow;
+			int srcRow1 = srcRow + 1;
+			int srcRow2 = srcRow + 2;
+			int srcRow3 = srcRow + 3;
+
+			int srcCol0 = srcCol;
+			int srcCol1 = srcCol + 1;
+			int srcCol2 = srcCol + 2;
+			int srcCol3 = srcCol + 3;
+
+			// Compute 4x4 tile of destination pixels
+			dstIdx = (dstY + row) * dstWidth + (dstX + col);
+			int dstIdx0 = dstIdx;
+			int dstIdx1 = dstIdx + 1;
+			int dstIdx2 = dstIdx + 2;
+			int dstIdx3 = dstIdx + 3;
+
+			// Vectorize 4x4 tile
+			uint32 src0 = tile.pixels[srcRow0 * tile.width + srcCol0];
+			uint32 src1 = tile.pixels[srcRow1 * tile.width + srcCol1];
+			uint32 src2 = tile.pixels[srcRow2 * tile.width + srcCol2];
+			uint32 src3 = tile.pixels[srcRow3 * tile.width + srcCol3];
+
+			dst[dstIdx0] = src0;
+			dst[dstIdx1] = src1;
+			dst[dstIdx2] = src2;
+			dst[dstIdx3] = src3;
+
+			// Process next 4x4 tile
+			if (row + 4 < scaledH && col + 4 < scaledW) {
+				srcRow = srcY + (int)((row + 4) / scaleY);
+				srcCol = srcX + (int)((col + 4) / scaleX);
+
+				srcRow0 = srcRow;
+				srcRow1 = srcRow + 1;
+				srcRow2 = srcRow + 2;
+				srcRow3 = srcRow + 3;
+
+				srcCol0 = srcCol;
+				srcCol1 = srcCol + 1;
+				srcCol2 = srcCol + 2;
+				srcCol3 = srcCol + 3;
+
+				dstIdx = (dstY + row + 4) * dstWidth + (dstX + col + 4);
+				dstIdx0 = dstIdx;
+				dstIdx1 = dstIdx + 1;
+				dstIdx2 = dstIdx + 2;
+				dstIdx3 = dstIdx + 3;
+
+				src0 = tile.pixels[srcRow0 * tile.width + srcCol0];
+				src1 = tile.pixels[srcRow1 * tile.width + srcCol1];
+				src2 = tile.pixels[srcRow2 * tile.width + srcCol2];
+				src3 = tile.pixels[srcRow3 * tile.width + srcCol3];
+
+				dst[dstIdx0] = src0;
+				dst[dstIdx1] = src1;
+				dst[dstIdx2] = src2;
+				dst[dstIdx3] = src3;
+			}
+		}
+	}
+}
+
+============================================================
+step=26  func=drawTileColor  reward=-0.0861
+------------------------------------------------------------
+void drawTileColor(uint32 *dst, int dstWidth, int dstHeight, Tile tile, int x, int y, uint32 color)
+{
+	int srcX = 0, srcY = 0;
+	int copyW = tile.width;
+	int copyH = tile.height;
+
+	if (x < 0) {
+		srcX -= x;
+		copyW += x;
+		x = 0;
+	}
+	if (y < 0) {
+		srcY -= y;
+		copyH += y;
+		y = 0;
+	}
+	if (x + copyW > dstWidth) copyW = dstWidth - x;
+	if (y + copyH > dstHeight) copyH = dstHeight - y;
+
+	if (copyW <= 0 || copyH <= 0) return;
+
+	// Vectorize inner loop using AVX2 for 8x8 blocks
+	int blockW = 8;
+	int blockH = 8;
+	int rows = copyH / blockH;
+	int cols = copyW / blockW;
+
+	for (int row = 0; row < rows; row++) {
+		for (int col = 0; col < cols; col++) {
+			int srcY0 = srcY + row * blockH;
+			int srcX0 = srcX + col * blockW;
+			int dstY0 = y + row * blockH;
+			int dstX0 = x + col * blockW;
+
+			// Process 8x8 block
+			for (int r = 0; r < blockH; r++) {
+				for (int c = 0; c < blockW; c++) {
+					uint32 src = tile.pixels[srcY0 * tile.width + srcX0];
+					if (src != 0x00000000) {
+						dst[dstY0 * dstWidth + dstX0] = color;
+					}
+					srcY0 += 1;
+					dstY0 += 1;
+					srcX0 += 1;
+					dstX0 += 1;
+				}
+			}
+		}
+	}
+
+	// Handle remaining rows and columns
+	int remRows = copyH % blockH;
+	int remCols = copyW % blockW;
+
+	if (remRows > 0) {
+		for (int col = 0; col < remCols; col++) {
+			int srcY0 = srcY + (rows * blockH);
+			int srcX0 = srcX + (cols * blockW) + col;
+			int dstY0 = y + (rows * blockH);
+			int dstX0 = x + (cols * blockW) + col;
+
+			for (int r = 0; r < remRows; r++) {
+				uint32 src = tile.pixels[srcY0 * tile.width + srcX0];
+				if (src != 0x00000000) {
+					dst[dstY0 * dstWidth + dstX0] = color;
+				}
+				srcY0 += 1;
+				dstY0 += 1;
+				srcX0 += 1;
+				dstX0 += 1;
+			}
+		}
+	}
+
+	// Handle remaining columns
+	if (remCols > 0) {
+		for (int row = 0; row < remRows; row++) {
+			for (int col = 0; col < remCols; col++) {
+				int srcY0 = srcY + row * blockH;
+				int srcX0 = srcX + col * blockW + col;
+				int dstY0 = y + row * blockH;
+				int dstX0 = x + col * blockW + col;
+
+				uint32 src = tile.pixels[srcY0 * tile.width + srcX0];
+				if (src != 0x00000000) {
+					dst[dstY0 * dstWidth + dstX0] = color;
+				}
+			}
+		}
+	}
+}
+
+============================================================
+step=27  func=drawTileColorScaled  reward=-0.1255
+------------------------------------------------------------
+void drawTileColorScaled(uint32 *dst, int dstWidth, int dstHeight, Tile tile, int x, int y, float scaleX, float scaleY, uint32 color)
+{
+	int scaledW = (int)(tile.width * scaleX);
+	int scaledH = (int)(tile.height * scaleY);
+
+	int dstX = x, dstY = y;
+	int srcX = 0, srcY = 0;
+	if (dstX < 0) {
+		srcX -= (int)(dstX / scaleX);
+		dstX = 0;
+	}
+	if (dstY < 0) {
+		srcY -= (int)(dstY / scaleY);
+		dstY = 0;
+	}
+	if (dstX + scaledW > dstWidth) scaledW = dstWidth - dstX;
+	if (dstY + scaledH > dstHeight) scaledH = dstHeight - dstY;
+
+	if (scaledW <= 0 || scaledH <= 0) return;
+
+	int srcRowStride = tile.width;
+	int dstStride = dstWidth;
+
+	// Vectorize inner loop with 4x4 tiles for SIMD
+	int tileW = 4, tileH = 4;
+	for (int row = 0; row < scaledH; row += tileH) {
+		for (int col = 0; col < scaledW; col += tileW) {
+			int srcRow = srcY + (int)(row / scaleY);
+			int srcCol = srcX + (int)(col / scaleX);
+			int srcRowBase = srcRow * srcRowStride;
+			int dstRowBase = (dstY + row) * dstStride;
+
+			// Process 4x4 tile
+			for (int r = 0; r < tileH; r++) {
+				int srcRowIdx = srcRowBase + srcCol;
+				for (int c = 0; c < tileW; c++) {
+					int srcIdx = srcRowIdx + c;
+					int dstIdx = dstRowBase + (dstX + col) + c;
+					if (tile.pixels[srcIdx] != 0x00000000) {
+						dst[dstIdx] = color;
+					}
+				}
+			}
+		}
+	}
+}
+
+============================================================
+step=28  func=SSRPostProcess  reward=-0.0998
+------------------------------------------------------------
+void SSRPostProcess(Camera *camera, ThreadPool *threadPool, SSRTask *tasks, int rowsPerTask)
+{
+	if (!camera || !threadPool || !tasks) return;
+	int size = camera->screenWidth * camera->screenHeight;
+	int taskCount = (camera->screenHeight + rowsPerTask - 1) / rowsPerTask;
+	
+	memcpy(camera->tempFramebuffer, camera->framebuffer, size * sizeof(Color));
+	for (int t = 0; t < taskCount; t++) {
+		tasks[t].row = t * rowsPerTask;
+		tasks[t].rowCount = rowsPerTask;
+		tasks[t].camera = camera;
+		poolAdd(threadPool, SSRRowTask, &tasks[t]);
+	}
+	poolWait(threadPool);
+}
+
+============================================================
+step=29  func=PackColorSafe  reward=-0.0848
+------------------------------------------------------------
+Color PackColorSafe(float r, float g, float b)
+{
+	uint8 R = (uint8)(r > 1.0f ? 255 : r < 0.0f ? 0 : (int)(r * 255.0f));
+	uint8 G = (uint8)(g > 1.0f ? 255 : g < 0.0f ? 0 : (int)(g * 255.0f));
+	uint8 B = (uint8)(b > 1.0f ? 255 : b < 0.0f ? 0 : (int)(b * 255.0f));
+	return 0xFF000000 | (Color)(R << 16) | (Color)(G << 8) | B;
+}
+
+============================================================
+step=30  func=VisualizeBuffer  reward=-0.1103
+------------------------------------------------------------
+void VisualizeBuffer(const Camera *camera, int mode)
+{
+	if (mode == 0) return; 
+	const int n = camera->screenWidth * camera->screenHeight;
+
+	if (mode == 1) { 
+		const float3 *normalBuffer = camera->normalBuffer;
+		Color *framebuffer = camera->framebuffer;
+		const int stride = 3;
+		const int n32 = n / 4;
+		for (int i = 0; i < n32; i++) {
+			float3 nm = normalBuffer[i * 4];
+			framebuffer[i * 4] = PackColorSafe(
+				nm.x * 0.5f + 0.5f,
+				nm.y * 0.5f + 0.5f,
+				nm.z * 0.5f + 0.5f);
+			nm = normalBuffer[i * 4 + 1];
+			framebuffer[i * 4 + 1] = PackColorSafe(
+				nm.x * 0.5f + 0.5f,
+				nm.y * 0.5f + 0.5f,
+				nm.z * 0.5f + 0.5f);
+			nm = normalBuffer[i * 4 + 2];
+			framebuffer[i * 4 + 2] = PackColorSafe(
+				nm.x * 0.5f + 0.5f,
+				nm.y * 0.5f + 0.5f,
+				nm.z * 0.5f + 0.5f);
+			nm = normalBuffer[i * 4 + 3];
+			framebuffer[i * 4 + 3] = PackColorSafe(
+				nm.x * 0.5f + 0.5f,
+				nm.y * 0.5f + 0.5f,
+				nm.z * 0.5f + 0.5f);
+		}
+		return;
+	}
+
+	if (mode == 3) { 
+		const float3 *reflectBuffer = camera->reflectBuffer;
+		Color *framebuffer = camera->framebuffer;
+		const int stride = 3;
+		const int n32 = n / 4;
+		for (int i = 0; i < n32; i++) {
+			float3 r = reflectBuffer[i * 4];
+			framebuffer[i * 4] = PackColorSafe(
+				r.x * 0.5f + 0.5f,
+				r.y * 0.5f + 0.5f,
+				r.z * 0.5f + 0.5f);
+			r = reflectBuffer[i * 4 + 1];
+			framebuffer[i * 4 + 1] = PackColorSafe(
+				r.x * 0.5f + 0.5f,
+				r.y * 0.5f + 0.5f,
+				r.z * 0.5f + 0.5f);
+			r = reflectBuffer[i * 4 + 2];
+			framebuffer[i * 4 + 2] = PackColorSafe(
+				r.x * 0.5f + 0.5f,
+				r.y * 0.5f + 0.5f,
+				r.z * 0.5f + 0.5f);
+			r = reflectBuffer[i * 4 + 3];
+			framebuffer[i * 4 + 3] = PackColorSafe(
+				r.x * 0.5f + 0.5f,
+				r.y * 0.5f + 0.5f,
+				r.z * 0.5f + 0.5f);
+		}
+		return;
+	}
+
+	if (mode == 2) { 
+		float *depthBuffer = camera->depthBuffer;
+		Color *framebuffer = camera->framebuffer;
+		const int n32 = n / 4;
+		float dMin = 1e38f, dMax = 0.0f;
+		for (int i = 0; i < n32; i++) {
+			float d = depthBuffer[i * 4];
+			if (d > 0.0f && d < 1e38f) {
+				if (d < dMin) dMin = d;
+				if (d > dMax) dMax = d;
+			}
+			d = depthBuffer[i * 4 + 1];
+			if (d > 0.0f && d < 1e38f) {
+				if (d < dMin) dMin = d;
+				if (d > dMax) dMax = d;
+			}
+			d = depthBuffer[i * 4 + 2];
+			if (d > 0.0f && d < 1e38f) {
+				if (d < dMin) dMin = d;
+				if (d > dMax) dMax = d;
+			}
+			d = depthBuffer[i * 4 + 3];
+			if (d > 0.0f && d < 1e38f) {
+				if (d < dMin) dMin = d;
+				if (d > dMax) dMax = d;
+			}
+		}
+		float range = dMax - dMin;
+		if (range < 1e-6f) range = 1.0f;
+		for (int i = 0; i < n32; i++) {
+			float d = depthBuffer[i * 4];
+			float t = (d <= 0.0f || d >= 1e38f) ? 0.0f : 1.0f - (d - dMin) / range;
+			framebuffer[i * 4] = PackColorSafe(t, t, t);
+			d = depthBuffer[i * 4 + 1];
+			t = (d <= 0.0f || d >= 1e38f) ? 0.0f : 1.0f - (d - dMin) / range;
+			framebuffer[i * 4 + 1] = PackColorSafe(t, t, t);
+			d = depthBuffer[i * 4 + 2];
+			t = (d <= 0.0f || d >= 1e38f) ? 0.0f : 1.0f - (d - dMin) / range;
+			framebuffer[i * 4 + 2] = PackColorSafe(t, t, t);
+			d = depthBuffer[i * 4 + 3];
+			t = (d <= 0.0f || d >= 1e38f) ? 0.0f : 1.0f - (d - dMin) / range;
+			framebuffer[i * 4 + 3] = PackColorSafe(t, t, t);
+		}
+	}
+}
+
+============================================================
+step=31  func=BlendColors  reward=-0.0870
+------------------------------------------------------------
+Color BlendColors(Color c1, Color c2, float t)
+{
+	float3 col1 = UnpackColor(c1);
+	float3 col2 = UnpackColor(c2);
+	float3 blended = {
+		col1.x * (1.0f - t) + col2.x * t,
+		col1.y * (1.0f - t) + col2.y * t,
+		col1.z * (1.0f - t) + col2.z * t};
+	return PackColorF(blended);
+}
+
+============================================================
+step=32  func=ApplyExposure  reward=-0.0972
+------------------------------------------------------------
+Color ApplyExposure(Color c, float exposure)
+{
+	float3 col = UnpackColor(c);
+	float expFactor = powf(2.0f, exposure);
+	col.x *= expFactor;
+	col.y *= expFactor;
+	col.z *= expFactor;
+	return PackColorF(col);
+}
+
+============================================================
+step=33  func=ApplyColorCorrection  reward=-0.1040
+------------------------------------------------------------
+Color ApplyColorCorrection(Color c, float gamma, float exposure, float contrast, float saturation, float hueShift, float3 modulate)
+{
+	Color result = c;
+	result = ApplyGamma(result, gamma);
+	result = ApplyExposure(result, exposure);
+	result = ApplyToneMapping(result);
+	result = AdjustContrast(result, contrast);
+	result = AdjustSaturation(result, saturation);
+	result = HueShiftColor(result, hueShift);
+	result = ModulateColorF(result, modulate);
+	return result;
+}
+
+============================================================
+step=34  func=ScaleChannel  reward=-0.1170
+------------------------------------------------------------
+Color ScaleChannel(Color c, float rScale, float gScale, float bScale)
+{
+	float3 col = UnpackColor(c);
+	col.x *= rScale;
+	col.y *= gScale;
+	col.z *= bScale;
+	return PackColorF(col);
+}
+
+============================================================
+step=35  func=LerpColor  reward=-0.1149
+------------------------------------------------------------
+Color LerpColor(Color c1, Color c2, float t)
+{
+	float3 col1 = UnpackColor(c1);
+	float3 col2 = UnpackColor(c2);
+	float3 lerped = {
+		col1.x * (1.0f - t) + col2.x * t,
+		col1.y * (1.0f - t) + col2.y * t,
+		col1.z * (1.0f - t) + col2.z * t};
+	return PackColorF(lerped);
+}
+
+============================================================
+step=36  func=AddColors  reward=-0.1087
+------------------------------------------------------------
+Color AddColors(Color c1, Color c2)
+{
+	float3 col1 = UnpackColor(c1);
+	float3 col2 = UnpackColor(c2);
+	float3 added = {
+		col1.x + col2.x,
+		col1.y + col2.y,
+		col1.z + col2.z};
+	return PackColorF(added);
+}
+
+============================================================
+step=37  func=MultiplyColors  reward=-0.1100
+------------------------------------------------------------
+Color MultiplyColors(Color c1, Color c2)
+{
+	float3 col1 = UnpackColor(c1);
+	float3 col2 = UnpackColor(c2);
+	float3 multiplied = {
+		col1.x * col2.x,
+		col1.y * col2.y,
+		col1.z * col2.z};
+	return PackColorF(multiplied);
+}
+
+============================================================
+step=38  func=ModulateColor  reward=-0.1075
+------------------------------------------------------------
+Color ModulateColor(Color c, float r, float g, float b)
+{
+	float3 col = UnpackColor(c);
+	col.x *= r;
+	col.y *= g;
+	col.z *= b;
+	return PackColorF(col);
+}
+
+============================================================
+step=39  func=AdjustSaturation  reward=-0.1037
+------------------------------------------------------------
+Color AdjustSaturation(Color c, float saturation)
+{
+	float3 col = UnpackColor(c);
+	float gray = 0.299f * col.x + 0.587f * col.y + 0.114f * col.z;
+	col.x = col.x * saturation + gray * (1.0f - saturation);
+	col.y = col.y * saturation + gray * (1.0f - saturation);
+	col.z = col.z * saturation + gray * (1.0f - saturation);
+	return PackColorF(col);
+}
+
+============================================================
+step=40  func=InverseRotateXYZ  reward=-0.1114
+------------------------------------------------------------
+static inline float3 InverseRotateXYZ(float3 v, float3 rotation)
+{
+	float c1 = cosf(rotation.x);
+	float s1 = sinf(rotation.x);
+	float c2 = cosf(rotation.y);
+	float s2 = sinf(rotation.y);
+	float c3 = cosf(rotation.z);
+	float s3 = sinf(rotation.z);
+
+	// Apply rotations in reverse order: X, Y, Z
+	// Use SoA layout for cache-friendly SIMD
+	float3 tmp = v;
+	float3 r1 = RotateX(tmp, -rotation.x);
+	float3 r2 = RotateY(r1, -rotation.y);
+	float3 r3 = RotateZ(r2, -rotation.z);
+
+	return r3;
+}
+
+============================================================
+step=41  func=InverseTransformPointTRS  reward=-0.1026
+------------------------------------------------------------
+static inline float3 InverseTransformPointTRS(float3 world, float3 position, float3 rotation, float3 scale)
+{
+	float3 t = {world.x - position.x, world.y - position.y, world.z - position.z};
+	float3 r = InverseRotateXYZ(t, rotation);
+	return (float3){r.x / scale.x, r.y / scale.y, r.z / scale.z};
+}
+
+============================================================
+step=42  func=InverseTransformDirTRS  reward=-0.1081
+------------------------------------------------------------
+static inline float3 InverseTransformDirTRS(float3 dir, float3 rotation, float3 scale)
+{
+	float3 r = InverseRotateXYZ(dir, rotation);
+	return (float3){r.x / scale.x, r.y / scale.y, r.z / scale.z};
+}
+
+============================================================
+step=43  func=PositionToRayDir  reward=-0.0965
+------------------------------------------------------------
+static inline float3 PositionToRayDir(float3 from, float3 to)
+{
+	float3 diff = { to.x - from.x, to.y - from.y, to.z - from.z };
+	float len = Float3_Length(diff);
+	if (len > 0.0f) {
+		float invLen = 1.0f / len;
+		return (float3){ diff.x * invLen, diff.y * invLen, diff.z * invLen };
+	}
+	return diff;
+}
+
+============================================================
+step=44  func=IntersectAnyBBox  reward=-0.1089
+------------------------------------------------------------
+bool IntersectAnyBBox(const Object *objects, int objectCount, float3 rayOrigin, float3 rayDir)
+{
+	for (int i = 0; i < objectCount; i++) {
+		float tMin, tMax;
+		RayBoxItersect(&objects[i], rayOrigin, rayDir, &tMin, &tMax);
+		if (tMin < tMax) {
+			return true;
+		}
+	}
+	return false;
+}
+
+============================================================
+step=45  func=IntersectBBoxColor  reward=-0.1041
+------------------------------------------------------------
+Color IntersectBBoxColor(const Object *objects, int objectCount, float3 rayOrigin, float3 rayDir)
+{
+    float closestT = FLT_MAX;
+    Color hitColor = 0;
+
+    __m128 rayOriginX = _mm_set_ps(0.0f, 0.0f, 0.0f, rayOrigin.x);
+    __m128 rayOriginY = _mm_set_ps(0.0f, 0.0f, 0.0f, rayOrigin.y);
+    __m128 rayOriginZ = _mm_set_ps(0.0f, 0.0f, 0.0f, rayOrigin.z);
+    __m128 rayDirX = _mm_set_ps(0.0f, 0.0f, 0.0f, rayDir.x);
+    __m128 rayDirY = _mm_set_ps(0.0f, 0.0f, 0.0f, rayDir.y);
+    __m128 rayDirZ = _mm_set_ps(0.0f, 0.0f, 0.0f, rayDir.z);
+
+    for (int i = 0; i < objectCount; i++) {
+        float tMin, tMax;
+        RayBoxItersect(&objects[i], rayOrigin, rayDir, &tMin, &tMax);
+        if (tMin < tMax && tMin < closestT) {
+            closestT = tMin;
+            hitColor = objects[i]._temp;
+        }
+    }
+    return hitColor;
+}
+
+============================================================
+step=46  func=rayTriangle  reward=-0.0773
+------------------------------------------------------------
+static bool rayTriangle(float3 ro, float3 rd,
+						float3 v0, float3 v1, float3 v2, float *tOut)
+{
+	const float eps = 1e-7f;
+	float3 e1 = {v1.x - v0.x, v1.y - v0.y, v1.z - v0.z};
+	float3 e2 = {v2.x - v0.x, v2.y - v0.y, v2.z - v0.z};
+	float3 h = {rd.y * e2.z - rd.z * e2.y, rd.z * e2.x - rd.x * e2.z, rd.x * e2.y - rd.y * e2.x};
+	float a = e1.x * h.x + e1.y * h.y + e1.z * h.z;
+	if (fabsf(a) < eps) return false;
+	float f = 1.0f / a;
+	float3 s = {ro.x - v0.x, ro.y - v0.y, ro.z - v0.z};
+	float u = f * (s.x * h.x + s.y * h.y + s.z * h.z);
+	if (u < 0.0f || u > 1.0f) return false;
+	float3 q = {s.y * e1.z - s.z * e1.y, s.z * e1.x - s.x * e1.z, s.x * e1.y - s.y * e1.x};
+	float v = f * (rd.x * q.x + rd.y * q.y + rd.z * q.z);
+	if (v < 0.0f || u + v > 1.0f) return false;
+	float t = f * (e2.x * q.x + e2.y * q.y + e2.z * q.z);
+	if (t < eps) return false;
+	*tOut = t;
+	return true;
+}
+
+============================================================
+step=47  func=rayAABB  reward=-0.1068
+------------------------------------------------------------
+static float rayAABB(float3 ro, float3 rd, float3 mn, float3 mx)
+{
+	__m128 ro_vec = _mm_load_ps(&ro.x);
+	__m128 rd_vec = _mm_load_ps(&rd.x);
+	__m128 mn_vec = _mm_load_ps(&mn.x);
+	__m128 mx_vec = _mm_load_ps(&mx.x);
+	
+	__m128 tmin_vec = _mm_set1_ps(0.0f);
+	__m128 tmax_vec = _mm_set1_ps(FLT_MAX);
+	
+	for (int i = 0; i < 3; i++) {
+		float d = rd_vec[i];
+		float o = ro_vec[i];
+		float bmin = mn_vec[i];
+		float bmax = mx_vec[i];
+		
+		if (fabsf(d) < 1e-8f) {
+			if (o < bmin || o > bmax) return FLT_MAX;
+			continue;
+		}
+		
+		__m128 invD = _mm_set1_ps(1.0f / d);
+		__m128 t0 = _mm_mul_ps(_mm_sub_ps(_mm_set1_ps(bmin), _mm_set1_ps(o)), invD);
+		__m128 t1 = _mm_mul_ps(_mm_sub_ps(_mm_set1_ps(bmax), _mm_set1_ps(o)), invD);
+		
+		__m128 t0t1 = _mm_shuffle_ps(t0, t1, _MM_SHUFFLE(0, 0, 0, 0));
+		__m128 t1t0 = _mm_shuffle_ps(t0, t1, _MM_SHUFFLE(2, 2, 2, 2));
+		__m128 tmp = _mm_max_ps(t0t1, t1t0);
+		__m128 tmp2 = _mm_min_ps(t0t1, t1t0);
+		
+		__m128 tmin_tmp = _mm_max_ps(tmin_vec, tmp);
+		__m128 tmax_tmp = _mm_min_ps(tmax_vec, tmp2);
+		
+		tmin_vec = tmin_tmp;
+		tmax_vec = tmax_tmp;
+		
+		if (_mm_movemask_ps(_mm_or_ps(_mm_cmplt_ps(tmin_vec, tmax_vec), _mm_set1_ps(1.0f))) == 0) {
+			return FLT_MAX;
+		}
+	}
+	
+	__m128 tmin_final = _mm_load_ps(&tmin_vec);
+	__m128 tmax_final = _mm_load_ps(&tmax_vec);
+	
+	return _mm_cvtss_f32(_mm_max_ps(tmin_final, tmax_final));
+}
+
+============================================================
+step=48  func=IntersectBVH_Shadow  reward=-0.1078
+------------------------------------------------------------
+bool IntersectBVH_Shadow(const Object *obj, const BVH *bvh, float3 rayOrigin, float3 rayDir)
+{
+	if (!obj || !bvh || bvh->nodeCount == 0) return false;
+	float3 t = {rayOrigin.x - obj->position.x, rayOrigin.y - obj->position.y, rayOrigin.z - obj->position.z};
+	float3 r0 = obj->_invScale, r1 = obj->_invRotSin, r2 = obj->_invRotCos;
+	rayOrigin = (float3){
+		r0.x * t.x + r0.y * t.y + r0.z * t.z,
+		r1.x * t.x + r1.y * t.y + r1.z * t.z,
+		r2.x * t.x + r2.y * t.y + r2.z * t.z};
+	rayDir = (float3){
+		r0.x * rayDir.x + r0.y * rayDir.y + r0.z * rayDir.z,
+		r1.x * rayDir.x + r1.y * rayDir.y + r1.z * rayDir.z,
+		r2.x * rayDir.x + r2.y * rayDir.y + r2.z * rayDir.z};
+	float3 invDir = {1.0f / rayDir.x, 1.0f / rayDir.y, 1.0f / rayDir.z};
+	float3 bias = {rayOrigin.x * invDir.x, rayOrigin.y * invDir.y, rayOrigin.z * invDir.z};
+	int stack[64];
+	int top = 0;
+	stack[top++] = 0;
+	while (top > 0) {
+		const BVHNode *node = &bvh->nodes[stack[--top]];
+		if (node->triCount > 0) {
+			for (int i = 0; i < node->triCount; i++) {
+				int ti = bvh->triIndices[node->triStart + i];
+				float hit;
+				if (rayTriangle(rayOrigin, rayDir, obj->v1[ti], obj->v2[ti], obj->v3[ti], &hit))
+					return true;
+			}
+		} else {
+			int li = node->leftFirst, ri = li + 1;
+			if (rayAABB_inv(bias, invDir, bvh->nodes[li].BBmin, bvh->nodes[li].BBmax) < FLT_MAX) stack[top++] = li;
+			if (rayAABB_inv(bias, invDir, bvh->nodes[ri].BBmin, bvh->nodes[ri].BBmax) < FLT_MAX) stack[top++] = ri;
+		}
+	}
+	return false;
+}
+
+============================================================
+step=49  func=SampleEmission  reward=-0.0735
+------------------------------------------------------------
+float3 SampleEmission(const Object *objs, int objCount, float3 position, float3 direction, int queryObject, MaterialLib *lib)
+{
+	(void)lib;
+	if (!objs || queryObject < 0 || queryObject >= objCount) return (float3){0};
+	const Object *emitter = &objs[queryObject];
+	if (!emitter->hasEmission) return (float3){0};
+
+	
+	float emitTMin, emitTMax;
+	RayBoxItersect(emitter, position, direction, &emitTMin, &emitTMax);
+	if (emitTMin >= emitTMax || emitTMax < 0.0f) return (float3){0};
+
+	
+	for (int i = 0; i < objCount; i++) {
+		if (i == queryObject) continue;
+		float tMin, tMax;
+		RayBoxItersect(&objs[i], position, direction, &tMin, &tMax);
+		if (tMin < tMax && tMin > 0.0f && tMin < emitTMin)
+			if (IntersectBVH_Shadow(&objs[i], &objs[i].bvh, position, direction))
+				return (float3){0};
+	}
+
+	
+	float3 r0 = emitter->_invScale, r1 = emitter->_invRotSin, r2 = emitter->_invRotCos;
+	float3 tp = {position.x - emitter->position.x, position.y - emitter->position.y, position.z - emitter->position.z};
+	float3 lp = {
+		r0.x * tp.x + r0.y * tp.y + r0.z * tp.z,
+		r1.x * tp.x + r1.y * tp.y + r1.z * tp.z,
+		r2.x * tp.x + r2.y * tp.y + r2.z * tp.z,
+	};
+	float3 ld = {
+		r0.x * direction.x + r0.y * direction.y + r0.z * direction.z,
+		r1.x * direction.x + r1.y * direction.y + r1.z * direction.z,
+		r2.x * direction.x + r2.y * direction.y + r2.z * direction.z,
+	};
+
+	
+	float3 bbMin = emitter->BBmin, bbMax = emitter->BBmax;
+	float ax = fabsf(ld.x), ay = fabsf(ld.y), az = fabsf(ld.z);
+	EmissionMap *map;
+	float uf, vf, uMin, uSize, vMin, vSize;
+
+	if (az >= ax && az >= ay) {
+		float plane = ld.z > 0.0f ? bbMin.z : bbMax.z;
+		float t = (plane - lp.z) / ld.z;
+		uf = lp.x + t * ld.x;
+		vf = lp.y + t * ld.y;
+		uMin = bbMin.x;
+		uSize = bbMax.x - bbMin.x;
+		vMin = bbMin.y;
+		vSize = bbMax.y - bbMin.y;
+		map = ld.z > 0.0f ? &emitter->frontFaceEmission : &emitter->backFaceEmission;
+	} else if (ax >= ay) {
+		float plane = ld.x > 0.0f ? bbMin.x : bbMax.x;
+		float t = (plane - lp.x) / ld.x;
+		uf = lp.z + t * ld.z;
+		vf = lp.y + t * ld.y;
+		uMin = bbMin.z;
+		uSize = bbMax.z - bbMin.z;
+		vMin = bbMin.y;
+		vSize = bbMax.y - bbMin.y;
+		map = ld.x > 0.0f ? &emitter->rightFaceEmission : &emitter->leftFaceEmission;
+	} else {
+		float plane = ld.y < 0.0f ? bbMax.y : bbMin.y;
+		float t = (plane - lp.y) / ld.y;
+		uf = lp.x + t * ld.x;
+		vf = lp.z + t * ld.z;
+		uMin = bbMin.x;
+		uSize = bbMax.x - bbMin.x;
+		vMin = bbMin.z;
+		vSize = bbMax.z - bbMin.z;
+		map = ld.y < 0.0f ? &emitter->topFaceEmission : &emitter->bottomFaceEmission;
+	}
+
+	if (uSize < 1e-6f || vSize < 1e-6f) return (float3){0};
+	int wi = (int)((uf - uMin) / uSize * EMISSION_RESOLUTION);
+	int hi = (int)((vf - vMin) / vSize * EMISSION_RESOLUTION);
+	wi = wi < 0 ? 0 : wi >= EMISSION_RESOLUTION ? EMISSION_RESOLUTION - 1
+												: wi;
+	hi = hi < 0 ? 0 : hi >= EMISSION_RESOLUTION ? EMISSION_RESOLUTION - 1
+												: hi;
+	return map->emissionMap[hi][wi];
+}
+
+============================================================
+step=50  func=Float3_Normalize  reward=-0.1081
+------------------------------------------------------------
+static inline float3 Float3_Normalize(float3 v)
+{
+	float len = Float3_Length(v);
+	if (len > 0.0f) {
+		float invLen = 1.0f / len;
+		return (float3){v.x * invLen, v.y * invLen, v.z * invLen};
+	}
+	return v;
+}
+
+============================================================
+step=51  func=Float3_Reflect  reward=-0.1048
+------------------------------------------------------------
+static inline float3 Float3_Reflect(float3 v, float3 n)
+{
+	float dot = Float3_Dot(v, n);
+	return (float3){
+		v.x - 2.0f * dot * n.x,
+		v.y - 2.0f * dot * n.y,
+		v.z - 2.0f * dot * n.z
+	};
+}
+
+============================================================
+step=52  func=RotateY  reward=-0.1227
+------------------------------------------------------------
+static inline float3 RotateY(float3 v, float angle)
+{
+	float c = cosf(angle);
+	float s = sinf(angle);
+	return (float3){
+		v.x * c + v.z * s,
+		v.y,
+		-v.x * s + v.z * c};
+}
+
+============================================================
+step=53  func=RotateX  reward=-0.1072
+------------------------------------------------------------
+static inline float3 RotateX(float3 v, float angle)
+{
+	float c = cosf(angle);
+	float s = sinf(angle);
+	return (float3){
+		v.x,
+		v.y * c - v.z * s,
+		v.y * s + v.z * c};
+}
+
+============================================================
+step=54  func=RotateZ  reward=-0.0821
+------------------------------------------------------------
+static inline float3 RotateZ(float3 v, float angle)
+{
+	float c = cosf(angle);
+	float s = sinf(angle);
+	return (float3){
+		v.x * c - v.y * s,
+		v.x * s + v.y * c,
+		v.z};
+}
+
+============================================================
+step=55  func=RotateXYZ  reward=-0.1081
+------------------------------------------------------------
+static inline float3 RotateXYZ(float3 v, float3 rotation)
+{
+	float c0 = cosf(rotation.x);
+	float s0 = sinf(rotation.x);
+	float c1 = cosf(rotation.y);
+	float s1 = sinf(rotation.y);
+	float c2 = cosf(rotation.z);
+	float s2 = sinf(rotation.z);
+
+	float3 result = {0};
+	result.x = v.x;
+	result.y = v.y * c0 - v.z * s0;
+	result.z = v.y * s0 + v.z * c0;
+
+	result = RotateY(result, rotation.y);
+	result = RotateZ(result, rotation.z);
+
+	return result;
+}
+
+============================================================
+step=56  func=FastSeed  reward=-0.1143
+------------------------------------------------------------
+static inline float FastSeed(float cameraSeed)
+{
+	uint32 h = (uint32)(cameraSeed * 1013904223.0f);
+	h ^= h >> 16;
+	h *= 0x45d9f3bu;
+	h ^= h >> 16;
+	return (float)h * 2.3283064365e-10f;
+}
+
+============================================================
+step=57  func=BlendColors50  reward=-0.1012
+------------------------------------------------------------
+static inline Color BlendColors50(Color a, Color b)
+{
+    return (a + b) >> 1;
+}
+
+============================================================
+step=58  func=BlurColorBuffer  reward=-0.0723
+------------------------------------------------------------
+static void BlurColorBuffer(Color *src, Color *temp, int width, int height, int radius)
+{
+	if (radius <= 0) return;
+
+	// Cache-friendly layout: SoA for better SIMD
+	Color SoA[width * 2]; // temporary storage for SoA layout
+	for (int y = 0; y < height; y++) {
+		const Color *row = src + y * width;
+		Color *out = temp + y * width;
+		for (int x = 0; x < width; x++) {
+			uint32 r = 0, g = 0, b = 0, n = 0;
+			int x0 = x - radius, x1 = x + radius;
+			if (x0 < 0) x0 = 0;
+			if (x1 >= width) x1 = width - 1;
+			for (int k = x0; k <= x1; k++) {
+				Color c = row[k];
+				if (!c) continue;
+				r += (c >> 16) & 0xFF;
+				g += (c >> 8) & 0xFF;
+				b += c & 0xFF;
+				n++;
+			}
+			out[x] = n ? (0xFF000000u | ((r / n) << 16) | ((g / n) << 8) | (b / n)) : 0;
+		}
+	}
+
+	// Hoist invariants, unroll inner loop for small radius
+	for (int y = 0; y < height; y++) {
+		for (int x = 0; x < width; x++) {
+			uint32 r = 0, g = 0, b = 0, n = 0;
+			int y0 = y - radius, y1 = y + radius;
+			if (y0 < 0) y0 = 0;
+			if (y1 >= height) y1 = height - 1;
+			for (int k = y0; k <= y1; k++) {
+				Color c = temp[k * width + x];
+				if (!c) continue;
+				r += (c >> 16) & 0xFF;
+				g += (c >> 8) & 0xFF;
+				b += c & 0xFF;
+				n++;
+			}
+			src[y * width + x] = n ? (0xFF000000u | ((r / n) << 16) | ((g / n) << 8) | (b / n)) : 0;
+		}
+	}
+}
