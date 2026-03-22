@@ -14,10 +14,10 @@ GENGIN = os.path.join(os.path.dirname(os.path.abspath(__file__)), "gengin")
 BENCHMARK_STATS = {
     "frames": 359,
     "duration_s": 2.5,
-    "avg_ms": 6.983,
-    "median_ms": 6.826,
+    "avg_ms": 6.974,
+    "median_ms": 6.794,
     "p99_ms": 11.053,
-    "frame_hashes": ["0x2717c50e", "0x81745ff7", "0x81745ff7", "0x81745ff7", "0x81745ff7"]
+    "frame_hashes": ["0x7abb971f", "0x03f3ef9e", "0x03f3ef9e", "0x03f3ef9e", "0x03f3ef9e"]
 }
 
 SYSTEM_PROMPT = """\
@@ -34,8 +34,12 @@ single target C function to be faster, while preserving correctness.
 ## Optimisation targets (in priority order)
 1. Reduce average frame time (avg_ms) and median frame time (median_ms).
 2. Reduce tail latency (p99_ms).
-3. Prefer cache-friendly memory access, SIMD-friendly data layouts, and loop transforms \
-(unrolling, tiling, hoisting invariants) over algorithmic changes when the algorithm is already optimal.
+3. Aggressively use SIMD intrinsics (SSE2, SSE4.1, AVX, AVX2) wherever applicable — vectorise \
+inner loops, use `_mm256_*` / `_mm_*` intrinsics for float/int arithmetic, and add \
+`#include <immintrin.h>` at the top of the function if needed.
+4. Prefer cache-friendly memory access, SIMD-friendly data layouts (AoS → SoA where beneficial), \
+and loop transforms (unrolling, tiling, hoisting invariants) over algorithmic changes when the \
+algorithm is already optimal.
 
 ## Current benchmark baseline
 """
@@ -56,7 +60,7 @@ def build_prompt(context_text):
     return SYSTEM_PROMPT + str(BENCHMARK_STATS) + "\n\n## Target function with context\n" + context_text
 
 
-def generate_response(model, tokenizer, prompt, max_new_tokens=512):
+def generate_response(model, tokenizer, prompt, max_new_tokens=2048):
     FastLanguageModel.for_inference(model)
     messages = [{"role": "user", "content": [{"type": "text", "text": prompt}]}]
     text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
@@ -68,21 +72,76 @@ def generate_response(model, tokenizer, prompt, max_new_tokens=512):
     return result
 
 
+# Only optimise functions that are on the hot rendering path.
+# Everything else (input, loader, scene setup, GPU API wrappers, font, etc.)
+# produces noise without affecting frame time.
+RENDER_FUNCTIONS = {
+    # Ray / path tracing core
+    "RayCast", "rayCollision", "RayTraceRowFunc", "RayTraceScene",
+    "ComputeRayDirection", "RandomHemisphereDirection",
+    "RandomHemisphereDirectionWithMaterial", "RandomObjectHitRay",
+    "applySkybox", "hdrToLDR",
+    # BVH / intersection
+    "rayAABB", "rayAABB_inv", "rayTriangle",
+    "IntersectAnyBBox", "IntersectBBoxColor", "IntersectBVH_Shadow",
+    # SSR post-process
+    "SSRPostProcess", "SSRPostProcessSingleThreaded",
+    "SSRProcessRow", "SSRRowTask",
+    # Tile draw
+    "drawTile", "drawTileColor", "drawTileColorScaled", "drawTileScaled",
+    # Post-process / blur / shadow / dither
+    "BlurBuffer", "BlurColorBuffer", "ShadowPostProcess",
+    "DitherPostProcess", "DitherOrderedPostProcess",
+    # Color pipeline
+    "ApplyToneMapping", "ApplyExposure", "ApplyGamma", "ApplyColorCorrection",
+    "AdjustContrast", "AdjustSaturation", "PackColor", "PackColorF",
+    "PackColorFast01", "PackColorSafe", "UnpackColor", "UnpackColorInt",
+    "BlendColors", "BlendColors50", "MultiplyColors", "AddColors",
+    "ModulateColor", "ModulateColorF", "ScaleColor", "ScaleChannel",
+    "LerpColor", "VisualizeBuffer",
+    # Image post-process
+    "BoxBlur3x3", "DecimateBuffer", "UpsampleBilinear",
+    # Math primitives (called in inner loops)
+    "Float3_Add", "Float3_Sub", "Float3_Mul", "Float3_Div", "Float3_Scale",
+    "Float3_Dot", "Float3_Cross", "Float3_Normalize", "Float3_Length",
+    "Float3_Lerp", "Float3_Reflect", "Float3_Min", "Float3_Max", "Float3_Abs",
+    "PositionToRayDir",
+    "RotateX", "RotateY", "RotateZ", "RotateXYZ",
+    "InverseRotateXYZ", "TransformPointTRS",
+    "InverseTransformPointTRS", "InverseTransformDirTRS",
+    "MinF32", "MaxF32",
+    # Rasteriser helpers
+    "EdgeFunction", "BuildRotMat3", "ApplyRotMat3", "FastSeed",
+    # Emission / lighting
+    "SampleEmission", "CalculateFaceEmissions",
+}
+
+BEST_CHECKPOINT = "./lora_checkpoints/best"
+
 def load_lora_model():
-    model, tokenizer = FastLanguageModel.from_pretrained(
-        model_name=HF_MODEL,
-        max_seq_length=4096,
-        load_in_4bit=True,
-    )
-    model = FastLanguageModel.get_peft_model(
-        model,
-        r=16,
-        lora_alpha=32,
-        lora_dropout=0.05,
-        target_modules=["q_proj", "k_proj", "v_proj", "o_proj",
-                        "gate_proj", "up_proj", "down_proj"],
-        use_gradient_checkpointing="unsloth",
-    )
+    if os.path.isdir(BEST_CHECKPOINT):
+        print(f"Resuming from checkpoint: {BEST_CHECKPOINT}")
+        model, tokenizer = FastLanguageModel.from_pretrained(
+            model_name=BEST_CHECKPOINT,
+            max_seq_length=4096,
+            load_in_4bit=True,
+        )
+    else:
+        print(f"No checkpoint found, loading base model: {HF_MODEL}")
+        model, tokenizer = FastLanguageModel.from_pretrained(
+            model_name=HF_MODEL,
+            max_seq_length=4096,
+            load_in_4bit=True,
+        )
+        model = FastLanguageModel.get_peft_model(
+            model,
+            r=16,
+            lora_alpha=32,
+            lora_dropout=0.05,
+            target_modules=["q_proj", "k_proj", "v_proj", "o_proj",
+                            "gate_proj", "up_proj", "down_proj"],
+            use_gradient_checkpointing="unsloth",
+        )
     return model, tokenizer
 
 
@@ -113,12 +172,25 @@ def make_grpo_reward_fn(prompt_map):
     return reward_fn
 
 
-def save_best_model(model, tokenizer, reward, best_reward, path="./lora_checkpoints/best"):
+BEST_REWARD_FILE = os.path.join(BEST_CHECKPOINT, "best_reward.txt")
+
+def load_best_reward():
+    if os.path.isfile(BEST_REWARD_FILE):
+        try:
+            with open(BEST_REWARD_FILE) as f:
+                return float(f.read().strip())
+        except (ValueError, OSError):
+            pass
+    return 0.0
+
+def save_best_model(model, tokenizer, reward, best_reward, path=BEST_CHECKPOINT):
     if reward <= best_reward:
         return best_reward
     print(f"New best reward {reward:.4f} (prev {best_reward:.4f}), saving model...")
     model.save_pretrained(path)
     tokenizer.save_pretrained(path)
+    with open(os.path.join(path, "best_reward.txt"), "w") as f:
+        f.write(str(reward))
     wandb.log({"best_reward": reward})
     wandb.run.summary["best_reward"] = reward
     wandb.run.summary["best_model_path"] = path
@@ -137,6 +209,8 @@ def run_training_step(successful_rewrites, model, tokenizer, best_reward):
     prompt_map = {}
 
     for i, func in enumerate(functions):
+        if func not in RENDER_FUNCTIONS:
+            continue
         text = show_context(func, functions, structs, returnString=True)
         if text is None:
             continue
@@ -155,7 +229,7 @@ def run_training_step(successful_rewrites, model, tokenizer, best_reward):
         num_train_epochs=1,
         per_device_train_batch_size=1,
         gradient_accumulation_steps=8,
-        max_new_tokens=512,
+        max_new_tokens=2048,
         num_generations=4,
         save_steps=50,
         logging_steps=1,
@@ -176,6 +250,7 @@ def run_training_step(successful_rewrites, model, tokenizer, best_reward):
 
     avg_reward_in_batch = sum(r["reward"] for r in successful_rewrites) / len(successful_rewrites)
     best_reward = save_best_model(model, tokenizer, avg_reward_in_batch, best_reward)
+    successful_rewrites.clear()
     return best_reward
 
 
@@ -205,7 +280,8 @@ if __name__ == "__main__":
     model, tokenizer = load_lora_model()
 
     successful_rewrites = []
-    best_reward = 0.0
+    best_reward = load_best_reward()
+    print(f"Starting with best_reward = {best_reward:.4f}")
     step = 0
 
     while True:
@@ -216,6 +292,8 @@ if __name__ == "__main__":
         iteration_rewards = []
 
         for func in functions:
+            if func not in RENDER_FUNCTIONS:
+                continue
             print("Selected function:", func)
             text = show_context(func, functions, structs, returnString=True)
             if text is None:
@@ -223,7 +301,7 @@ if __name__ == "__main__":
                 continue
 
             prompt        = build_prompt(text)
-            response_text = generate_response(model, tokenizer, prompt)
+            response_text = generate_response(model, tokenizer, prompt, max_new_tokens=2048)
 
             print("Model response :\n", response_text)
 

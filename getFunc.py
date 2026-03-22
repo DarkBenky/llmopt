@@ -107,18 +107,24 @@ def find_structs(sources):
 def run_bench():
     """
     Run `make bench` in the gengin directory and return the parsed JSON results.
-    Returns a dict on success, or None if the build/run failed.
+    Returns a dict on success, or None if the build/run failed or timed out.
     """
     import subprocess
     import json
 
     result_path = os.path.join(GENGIN, 'bench_results.json')
 
-    proc = subprocess.run(
-        ['make', 'bench'],
-        cwd=GENGIN,
-        capture_output=True, text=True,
-    )
+    try:
+        proc = subprocess.run(
+            ['make', 'benchUnOpt'],
+            cwd=GENGIN,
+            capture_output=True, text=True,
+            timeout=30,
+        )
+    except subprocess.TimeoutExpired:
+        print("run_bench: make benchUnOpt timed out after 30 seconds.")
+        return None
+
     if proc.returncode != 0:
         print(f"run_bench: make bench failed:\n{proc.stderr.strip()}")
         return None
