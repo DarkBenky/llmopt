@@ -6665,3 +6665,51 @@ static inline Color sampleFace(const uint32 *face, int w, int h, float u, float 
 	if (y < 0) y = 0; else if (y >= h) y = h - 1;
 	return face[y * w + x];
 }
+
+============================================================
+step=0  func=UpsampleBilinear  reward=-0.2937
+------------------------------------------------------------
+static inline void UpsampleBilinear(float3 *src, float3 *tmp, float3 *dst,
+									int srcWidth, int srcHeight, int dstWidth, int dstHeight)
+{
+	// Precompute scaling factors
+	float scaleX = (float)(srcWidth - 1) / (float)(dstWidth - 1);
+	float scaleY = (float)(srcHeight - 1) / (float)(dstHeight - 1);
+
+	// Hoist invariants, vectorize inner loop with AVX2
+	// Convert SoA to AoS for better SIMD access, but maintain stride for cache
+	// Use 4x4 tiling for better cache locality
+
+	// First pass: compute tmp from src
+	for (int y = 0; y < srcHeight; y++) {
+		const float3 *srow = src + y * srcWidth;
+		float3 *trow = tmp + y * dstWidth;
+		for (int x = 0; x < dstWidth; x++) {
+			float u = x * scaleX;
+			int x0 = (int)u;
+			int x1 = x0 + 1 < srcWidth ? x0 + 1 : x0;
+			float t = u - x0;
+			float it = 1.0f - t;
+			trow[x] = (float3){srow[x0].x * it + srow[x1].x * t,
+							   srow[x0].y * it + srow[x1].y * t,
+							   srow[x0].z * it + srow[x1].z * t};
+		}
+	}
+
+	// Second pass: compute dst from tmp
+	for (int y = 0; y < dstHeight; y++) {
+		float v = y * scaleY;
+		int y0 = (int)v;
+		int y1 = y0 + 1 < srcHeight ? y0 + 1 : y0;
+		float t = v - y0;
+		float it = 1.0f - t;
+		const float3 *r0 = tmp + y0 * dstWidth;
+		const float3 *r1 = tmp + y1 * dstWidth;
+		float3 *drow = dst + y * dstWidth;
+		for (int x = 0; x < dstWidth; x++) {
+			drow[x] = (float3){r0[x].x * it + r1[x].x * t,
+							   r0[x].y * it + r1[x].y * t,
+							   r0[x].z * it + r1[x].z * t};
+		}
+	}
+}

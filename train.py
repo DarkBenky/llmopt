@@ -11,13 +11,24 @@ HF_MODEL = "unsloth/Qwen3-VL-4B-Instruct-bnb-4bit"
 
 GENGIN = os.path.join(os.path.dirname(os.path.abspath(__file__)), "gengin")
 
+# O3
+# BENCHMARK_STATS = {
+#     "frames": 359,
+#     "duration_s": 2.5,
+#     "avg_ms": 6.974,
+#     "median_ms": 6.794,
+#     "p99_ms": 11.053,
+#     "frame_hashes": ["0x7abb971f", "0x03f3ef9e", "0x03f3ef9e", "0x03f3ef9e", "0x03f3ef9e"]
+# }
+
+# O2 - model tries to match O2 opt from the same codebase, which is a more realistic target for optimisation.
 BENCHMARK_STATS = {
-    "frames": 359,
-    "duration_s": 2.5,
-    "avg_ms": 6.974,
-    "median_ms": 6.794,
-    "p99_ms": 11.053,
-    "frame_hashes": ["0x7abb971f", "0x03f3ef9e", "0x03f3ef9e", "0x03f3ef9e", "0x03f3ef9e"]
+  "frames": 239,
+  "duration_s": 2.0,
+  "avg_ms": 8.368,
+  "median_ms": 8.202,
+  "p99_ms": 13.482,
+  "frame_hashes": ["0x7abb971f", "0x03f3ef9e", "0x03f3ef9e", "0x03f3ef9e", "0x03f3ef9e"]
 }
 
 SYSTEM_PROMPT = """\
@@ -35,8 +46,9 @@ single target C function to be faster, while preserving correctness.
 1. Reduce average frame time (avg_ms) and median frame time (median_ms).
 2. Reduce tail latency (p99_ms).
 3. Aggressively use SIMD intrinsics (SSE2, SSE4.1, AVX, AVX2) wherever applicable — vectorise \
-inner loops, use `_mm256_*` / `_mm_*` intrinsics for float/int arithmetic, and add \
-`#include <immintrin.h>` at the top of the function if needed.
+inner loops, use `_mm256_*` / `_mm_*` intrinsics for float/int arithmetic. \
+CRITICAL: the correct vector types are `__m256` (8 floats), `__m128` (4 floats), `__m256i`, `__m128i`. \
+There is NO `__m256f` or `__m128f` — those do not exist. Do NOT add `#include <immintrin.h>` — it is already included globally.
 4. Prefer cache-friendly memory access, SIMD-friendly data layouts (AoS → SoA where beneficial), \
 and loop transforms (unrolling, tiling, hoisting invariants) over algorithmic changes when the \
 algorithm is already optimal.
