@@ -1,0 +1,250 @@
+
+============================================================
+step=0  func=main  reward=0.9991
+------------------------------------------------------------
+int main()
+{
+	mkdir("tests/img", 0755);
+
+	Camera camera;
+	initCamera(&camera, 800, 600, 90.0f, (float3){0.0f, 0.0f, 0.0f}, (float3){0.0f, 0.0f, 1.0f}, (float3){1.0f, 1.0f, 1.0f});
+
+	int pixels = camera.screenWidth * camera.screenHeight;
+	Color *backup = malloc(pixels * sizeof(Color));
+
+	FillTestImage(&camera);
+	memcpy(backup, camera.framebuffer, pixels * sizeof(Color));
+	SaveImage("tests/img/original.bmp", &camera);
+
+	
+	float timeTook[SAMPLES] = {0};
+	memcpy(camera.framebuffer, backup, pixels * sizeof(Color));
+	for (int i = 0; i < SAMPLES; i++) {
+		struct timespec t0, t1;
+		clock_gettime(CLOCK_MONOTONIC, &t0);
+		BlurScene(&camera);
+		clock_gettime(CLOCK_MONOTONIC, &t1);
+		timeTook[i] = (float)(t1.tv_sec - t0.tv_sec) + (float)(t1.tv_nsec - t0.tv_nsec) * 1e-9f;
+	}
+	
+	BlurScene(&camera);
+	SaveImage("tests/img/blur_single.bmp", &camera);
+
+	PerformanceMetrics metrics = ComputePerformanceMetrics(timeTook, SAMPLES);
+	printf("========================================\n");
+	printf("Single-threaded blur performance:\n");
+	printf("Average Time: %.6f seconds\n", metrics.averageTime);
+	printf("Median Time: %.6f seconds\n", metrics.medianTime);
+	printf("Min Time: %.6f seconds\n", metrics.minTime);
+	printf("Max Time: %.6f seconds\n", metrics.maxTime);
+	printf("Variance: %.6f\n", metrics.variance);
+	printf("P99 Time: %.6f seconds\n", metrics.p99Time);
+
+	
+	ThreadPool *pool = poolCreate(32, camera.screenHeight);
+	BlurTask tasks[camera.screenHeight];
+
+	memcpy(camera.framebuffer, backup, pixels * sizeof(Color));
+	for (int i = 0; i < SAMPLES; i++) {
+		struct timespec t0, t1;
+		clock_gettime(CLOCK_MONOTONIC, &t0);
+		for (int
+
+============================================================
+step=1  func=CreateCube  reward=1.0073
+------------------------------------------------------------
+CreateCube(&objects[1], (float3){-4.0f, 1.5f, 8.0f, 0.0f})
+
+============================================================
+step=2  func=DecimateBuffer  reward=1.0520
+------------------------------------------------------------
+static inline void DecimateBuffer(float3 *src, float3 *dst, int width, int height, int factor)
+{
+	int dstWidth = width / factor;
+	int dstHeight = height / factor;
+	float invSamples = 1.0f / (float)(factor * factor);
+	for (int y = 0; y < dstHeight; y++) {
+		for (int x = 0; x < dstWidth; x++) {
+			float3 accum = {0.0f, 0.0f, 0.0f};
+			for (int ky = 0; ky < factor; ky++) {
+				const float3 *row = src + (y * factor + ky) * width + x * factor;
+				for (int kx = 0; kx < factor; kx++) {
+					accum.x += row[kx].x;
+					accum.y += row[kx].y;
+					accum.z += row[kx].z;
+				}
+			}
+			dst[y * dstWidth + x] = (float3){accum.x * invSamples, accum.y * invSamples, accum.z * invSamples};
+		}
+	}
+}
+
+============================================================
+step=0  func=main  reward=0.0211
+------------------------------------------------------------
+int main()
+{
+	mkdir("tests/img", 0755);
+
+	Camera camera;
+	initCamera(&camera, 800, 600, 90.0f, (float3){0.0f, 0.0f, 0.0f}, (float3){0.0f, 0.0f, 1.0f}, (float3){1.0f, 1.0f, 1.0f});
+
+	int pixels = camera.screenWidth * camera.screenHeight;
+	Color *backup = malloc(pixels * sizeof(Color));
+
+	FillTestImage(&camera);
+	memcpy(backup, camera.framebuffer, pixels * sizeof(Color));
+	SaveImage("tests/img/original.bmp", &camera);
+
+	
+	float timeTook[SAMPLES] = {0};
+	memcpy(camera.framebuffer, backup, pixels * sizeof(Color));
+	for (int i = 0; i < SAMPLES; i++) {
+		struct timespec t0, t1;
+		clock_gettime(CLOCK_MONOTONIC, &t0);
+		BlurScene(&camera);
+		clock_gettime(CLOCK_MONOTONIC, &t1);
+		timeTook[i] = (float)(t1.tv_sec - t0.tv_sec) + (float)(t1.tv_nsec - t0.tv_nsec) * 1e-9f;
+	}
+	
+	BlurScene(&camera);
+	SaveImage("tests/img/blur_single.bmp", &camera);
+
+	PerformanceMetrics metrics = ComputePerformanceMetrics(timeTook, SAMPLES);
+	printf("========================================\n");
+	printf("Single-threaded blur performance:\n");
+	printf("Average Time: %.6f seconds\n", metrics.averageTime);
+	printf("Median Time: %.6f seconds\n", metrics.medianTime);
+	printf("Min Time: %.6f seconds\n", metrics.minTime);
+	printf("Max Time: %.6f seconds\n", metrics.maxTime);
+	printf("Variance: %.6f\n", metrics.variance);
+	printf("P99 Time: %.6f seconds\n", metrics.p99Time);
+
+	
+	ThreadPool *pool = poolCreate(32, camera.screenHeight);
+	BlurTask tasks[camera.screenHeight];
+
+	memcpy(camera.framebuffer, backup, pixels * sizeof(Color));
+	for (int i = 0; i < SAMPLES; i++) {
+		struct timespec t0, t1;
+		clock_gettime(CLOCK_MONOTONIC, &t0);
+		for (int
+
+============================================================
+step=1  func=CreateCube  reward=-0.0303
+------------------------------------------------------------
+CreateCube(&objects[1], (float3){-4.0f, 1.5f, 8.0f, 0.0f})
+
+============================================================
+step=2  func=DecimateBuffer  reward=0.0183
+------------------------------------------------------------
+static inline void DecimateBuffer(float3 *src, float3 *dst, int width, int height, int factor)
+{
+	int dstWidth = width / factor;
+	int dstHeight = height / factor;
+	float invSamples = 1.0f / (float)(factor * factor);
+	for (int y = 0; y < dstHeight; y++) {
+		for (int x = 0; x < dstWidth; x++) {
+			float3 accum = {0.0f, 0.0f, 0.0f};
+			for (int ky = 0; ky < factor; ky++) {
+				const float3 *row = src + (y * factor + ky) * width + x * factor;
+				for (int kx = 0; kx < factor; kx++) {
+					accum.x += row[kx].x;
+					accum.y += row[kx].y;
+					accum.z += row[kx].z;
+				}
+			}
+			dst[y * dstWidth + x] = (float3){accum.x * invSamples, accum.y * invSamples, accum.z * invSamples};
+		}
+	}
+}
+
+============================================================
+step=3  func=TransformPoint  reward=-0.0432
+------------------------------------------------------------
+static inline float3 TransformPoint(const Object *obj, float3 local)
+{
+	float3 scaled = {
+		local.x * obj->scale.x,
+		local.y * obj->scale.y,
+		local.z * obj->scale.z};
+	float3 rotated = RotateXYZ(scaled, obj->rotation);
+	return (float3){
+		rotated.x + obj->position.x,
+		rotated.y + obj->position.y,
+		rotated.z + obj->position.z};
+}
+
+============================================================
+step=4  func=ObjectBehindCamera  reward=-0.0440
+------------------------------------------------------------
+bool ObjectBehindCamera(const Object *obj, float3 camPos, float3 camForward)
+{
+	float3 mn = obj->worldBBmin;
+	float3 mx = obj->worldBBmax;
+
+	float3 corners[8] = {
+		{mn.x, mn.y, mn.z},
+		{mx.x, mn.y, mn.z},
+		{mn.x, mx.y, mn.z},
+		{mx.x, mx.y, mn.z},
+		{mn.x, mn.y, mx.z},
+		{mx.x, mn.y, mx.z},
+		{mn.x, mx.y, mx.z},
+		{mx.x, mx.y, mx.z},
+	};
+
+	float3 toCorner;
+	float3 camForwardScaled = camForward;
+
+	for (int i = 0; i < 8; i++) {
+		toCorner.x = corners[i].x - camPos.x;
+		toCorner.y = corners[i].y - camPos.y;
+		toCorner.z = corners[i].z - camPos.z;
+
+		if (toCorner.x * camForwardScaled.x + toCorner.y * camForwardScaled.y + toCorner.z * camForwardScaled.z >= 0.0f)
+			return false;
+	}
+
+	return true;
+}
+
+============================================================
+step=5  func=Frustum_FromCamera  reward=0.0282
+------------------------------------------------------------
+Frustum Frustum_FromCamera(const Camera *cam)
+{
+	float3 fwd = Float3_Normalize(cam->forward);
+	float3 rgt = Float3_Normalize(cam->right);
+	float3 up = Float3_Normalize(cam->up);
+	float half_y = cam->fovScale;
+	float half_x = half_y * cam->aspect;
+	float3 pos = cam->position;
+
+	Frustum f;
+	
+	f.planes[0] = (FrustumPlane){fwd, -Float3_Dot(fwd, pos)};
+	
+	float3 nl = Float3_Normalize((float3){rgt.x + half_x * fwd.x, rgt.y + half_x * fwd.y, rgt.z + half_x * fwd.z});
+	f.planes[1] = (FrustumPlane){nl, -Float3_Dot(nl, pos)};
+	
+	float3 nr = Float3_Normalize((float3){-rgt.x + half_x * fwd.x, -rgt.y + half_x * fwd.y, -rgt.z + half_x * fwd.z});
+	f.planes[2] = (FrustumPlane){nr, -Float3_Dot(nr, pos)};
+	
+	float3 nb = Float3_Normalize((float3){up.x + half_y * fwd.x, up.y + half_y * fwd.y, up.z + half_y * fwd.z});
+	f.planes[3] = (FrustumPlane){nb, -Float3_Dot(nb, pos)};
+	
+	float3 nt = Float3_Normalize((float3){-up.x + half_y * fwd.x, -up.y + half_y * fwd.y, -up.z + half_y * fwd.z});
+	f.planes[4] = (FrustumPlane){nt, -Float3_Dot(nt, pos)};
+	return f;
+}
+
+============================================================
+step=6  func=Object_SetMaterial  reward=0.0109
+------------------------------------------------------------
+void Object_SetMaterial(Object *obj, MaterialLib *lib, Material mat)
+{
+	int i;
+	for (i = 0; i < obj->triangleCount; i++)
+		lib->entries[obj->materialIds[i]] = mat;
+}

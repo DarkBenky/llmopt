@@ -253,38 +253,44 @@ def replace_function(func_name, new_definition, functions, sources):
     return True
 
 
-def show_context(target_func, functions, structs):
+def show_context(target_func, functions, structs, returnString = False):
     if target_func not in functions:
         print(f"Function '{target_func}' not found in codebase.")
-        return
+        return None
 
     target = functions[target_func]
     all_types = set()
+    lines = []
 
-    print(f"// {'=' * 60}")
-    print(f"// TARGET: {target_func}  [{target['file']}]")
-    print(f"// {'=' * 60}")
-    print(target['full'])
+    lines.append(f"// {'=' * 60}")
+    lines.append(f"// TARGET: {target_func}  [{target['file']}]")
+    lines.append(f"// {'=' * 60}")
+    lines.append(target['full'])
     all_types |= _used_types(target['full'])
 
     callees = {n: functions[n] for n in _called_functions(target['body']) if n in functions}
     if callees:
-        print(f"\n// {'=' * 60}")
-        print(f"// CALLED FUNCTIONS (1 level deep)")
-        print(f"// {'=' * 60}")
+        lines.append(f"\n// {'=' * 60}")
+        lines.append(f"// CALLED FUNCTIONS (1 level deep)")
+        lines.append(f"// {'=' * 60}")
         for fname, fdata in sorted(callees.items()):
-            print(f"\n// --- {fname}  [{fdata['file']}] ---")
-            print(fdata['full'])
+            lines.append(f"\n// --- {fname}  [{fdata['file']}] ---")
+            lines.append(fdata['full'])
             all_types |= _used_types(fdata['full'])
 
     found_structs = {t: structs[t] for t in all_types if t in structs}
     if found_structs:
-        print(f"\n// {'=' * 60}")
-        print(f"// USED STRUCTS / TYPES")
-        print(f"// {'=' * 60}")
+        lines.append(f"\n// {'=' * 60}")
+        lines.append(f"// USED STRUCTS / TYPES")
+        lines.append(f"// {'=' * 60}")
         for tname, tdata in sorted(found_structs.items()):
-            print(f"\n// --- {tname}  [{tdata['file']}] ---")
-            print(tdata['full'])
+            lines.append(f"\n// --- {tname}  [{tdata['file']}] ---")
+            lines.append(tdata['full'])
+
+    output = '\n'.join(lines)
+    if returnString:
+        return output
+    print(output)
 
 
 if __name__ == '__main__':
