@@ -78,6 +78,9 @@ def main():
             all_funcs = True
         elif arg in ("--positive", "-positive"):
             positive_only = True
+        elif arg in ("--help", "-help", "-h", "--h"):
+            print(__doc__)
+            return
 
     entries = parse_log(LOG_FILE)
 
