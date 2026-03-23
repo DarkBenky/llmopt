@@ -11,8 +11,8 @@ HF_MODEL = "unsloth/Qwen3-VL-4B-Instruct-bnb-4bit"
 
 GENGIN = os.path.join(os.path.dirname(os.path.abspath(__file__)), "gengin")
 
-# O3
-# BENCHMARK_STATS = {
+# O3 reference (informational only)
+# BENCHMARK_STATS_O3 = {
 #     "frames": 359,
 #     "duration_s": 2.5,
 #     "avg_ms": 6.974,
@@ -21,15 +21,31 @@ GENGIN = os.path.join(os.path.dirname(os.path.abspath(__file__)), "gengin")
 #     "frame_hashes": ["0x7abb971f", "0x03f3ef9e", "0x03f3ef9e", "0x03f3ef9e", "0x03f3ef9e"]
 # }
 
-# O2 - model tries to match O2 opt from the same codebase, which is a more realistic target for optimisation.
-BENCHMARK_STATS = {
-  "frames": 239,
-  "duration_s": 2.0,
-  "avg_ms": 8.368,
-  "median_ms": 8.202,
-  "p99_ms": 13.482,
-  "frame_hashes": ["0x7abb971f", "0x03f3ef9e", "0x03f3ef9e", "0x03f3ef9e", "0x03f3ef9e"]
-}
+# Baseline is measured at startup from the unmodified codebase at O1 (same flags
+# used when evaluating model rewrites). Reward = how much faster the model's code
+# is versus the original at the same optimisation level.
+BENCHMARK_STATS = None  # filled in by measure_baseline() at startup
+
+FRAME_HASHES = ["0x7abb971f", "0x03f3ef9e", "0x03f3ef9e", "0x03f3ef9e", "0x03f3ef9e"]
+
+def measure_baseline(runs=5):
+    print(f"Measuring O1 baseline on unmodified codebase ({runs} runs)...")
+    results = []
+    for i in range(runs):
+        data = run_bench()
+        if data is None:
+            raise RuntimeError(f"Failed to measure baseline on run {i+1} — make benchUnOpt failed.")
+        results.append(data)
+        print(f"  run {i+1}/{runs}: avg={data['avg_ms']:.3f}ms  median={data['median_ms']:.3f}ms  p99={data['p99_ms']:.3f}ms")
+
+    averaged = {
+        "avg_ms":      sum(r["avg_ms"]    for r in results) / runs,
+        "median_ms":   sum(r["median_ms"] for r in results) / runs,
+        "p99_ms":      sum(r["p99_ms"]    for r in results) / runs,
+        "frame_hashes": results[0]["frame_hashes"],
+    }
+    print(f"Baseline (averaged): avg={averaged['avg_ms']:.3f}ms  median={averaged['median_ms']:.3f}ms  p99={averaged['p99_ms']:.3f}ms")
+    return averaged
 
 SYSTEM_PROMPT = """\
 You are an expert C performance engineer. Your sole task is to rewrite the body of a \
@@ -41,14 +57,19 @@ single target C function to be faster, while preserving correctness.
 - Do NOT change any struct definitions, global variables, or helper functions.
 - Do NOT call any new external functions that are not already used in the provided context.
 - The function must produce bit-identical output to the original (verified by the frame hashes below).
+- Every declared variable MUST be used. Never declare variables that are unused or repeated.
+- Keep the implementation concise — do NOT pad with redundant declarations, duplicate code, or no-op statements.
+- Do NOT add any #include directives inside the function or at the top of your response — all required headers are already present in the file.
 
 ## Optimisation targets (in priority order)
 1. Reduce average frame time (avg_ms) and median frame time (median_ms).
 2. Reduce tail latency (p99_ms).
-3. Aggressively use SIMD intrinsics (SSE2, SSE4.1, AVX, AVX2) wherever applicable — vectorise \
-inner loops, use `_mm256_*` / `_mm_*` intrinsics for float/int arithmetic. \
+3. Use SIMD intrinsics (SSE2, SSE4.1, AVX, AVX2) for functions with inner loops or bulk data — \
+vectorise loops using `_mm256_*` / `_mm_*` intrinsics for float/int arithmetic. \
 CRITICAL: the correct vector types are `__m256` (8 floats), `__m128` (4 floats), `__m256i`, `__m128i`. \
-There is NO `__m256f` or `__m128f` — those do not exist. Do NOT add `#include <immintrin.h>` — it is already included globally.
+There is NO `__m256f` or `__m128f` — those do not exist. \
+Do NOT use SIMD on trivially scalar functions (e.g. single-value arithmetic, simple bit-shifts) — \
+for those, just return the existing logic unchanged.
 4. Prefer cache-friendly memory access, SIMD-friendly data layouts (AoS → SoA where beneficial), \
 and loop transforms (unrolling, tiling, hoisting invariants) over algorithmic changes when the \
 algorithm is already optimal.
@@ -57,15 +78,18 @@ algorithm is already optimal.
 """
 
 
-def calculate_reward(data):
-    if data["frame_hashes"] != BENCHMARK_STATS["frame_hashes"]:
+def calculate_reward(data, response_tokens=0):
+    if data["frame_hashes"] != FRAME_HASHES:
         return -1.0
     if data["avg_ms"] <= 0 or data["median_ms"] <= 0 or data["p99_ms"] <= 0:
         return -1.0
     avg_speedup    = BENCHMARK_STATS["avg_ms"]    / data["avg_ms"]
     p99_speedup    = BENCHMARK_STATS["p99_ms"]    / data["p99_ms"]
     median_speedup = BENCHMARK_STATS["median_ms"] / data["median_ms"]
-    return (0.3 * avg_speedup + 0.2 * p99_speedup + 0.5 * median_speedup) - 1.0
+    perf_reward = (0.3 * avg_speedup + 0.2 * p99_speedup + 0.5 * median_speedup) - 1.0
+    # Penalise token-stuffing: deduct 0.0001 per token over 400
+    length_penalty = max(0, response_tokens - 400) * 0.0001
+    return perf_reward - length_penalty
 
 
 def build_prompt(context_text):
@@ -82,6 +106,7 @@ def generate_response(model, tokenizer, prompt, max_new_tokens=2048):
     result = tokenizer.decode(output_ids[0][inputs.input_ids.shape[1]:], skip_special_tokens=True)
     FastLanguageModel.for_training(model)
     return result
+
 
 
 # Only optimise functions that are on the hot rendering path.
@@ -172,7 +197,7 @@ def make_grpo_reward_fn(prompt_map):
                 r = -1.0
                 wandb.log({"grpo/reward": r})
             else:
-                r = calculate_reward(bench_data)
+                r = calculate_reward(bench_data, len(tokenizer.tokenizer.encode(completion)))
                 wandb.log({
                     "grpo/reward": r,
                     "grpo/avg_ms": bench_data["avg_ms"],
@@ -184,34 +209,39 @@ def make_grpo_reward_fn(prompt_map):
     return reward_fn
 
 
-BEST_REWARD_FILE = os.path.join(BEST_CHECKPOINT, "best_reward.txt")
+import json
 
-def load_best_reward():
+BEST_REWARD_FILE = os.path.join(BEST_CHECKPOINT, "best_rewards.json")
+
+def load_best_rewards():
+    """Returns a dict mapping func_name -> best reward ever recorded."""
     if os.path.isfile(BEST_REWARD_FILE):
         try:
             with open(BEST_REWARD_FILE) as f:
-                return float(f.read().strip())
+                return json.load(f)
         except (ValueError, OSError):
             pass
-    return 0.0
+    return {}
 
-def save_best_model(model, tokenizer, reward, best_reward, path=BEST_CHECKPOINT):
-    if reward <= best_reward:
-        return best_reward
-    print(f"New best reward {reward:.4f} (prev {best_reward:.4f}), saving model...")
+def save_best_model(model, tokenizer, func, reward, best_rewards, path=BEST_CHECKPOINT):
+    prev = best_rewards.get(func, 0.0)
+    if reward <= prev:
+        return best_rewards
+    print(f"New best for '{func}': {reward:.4f} (prev {prev:.4f}), saving model...")
+    os.makedirs(path, exist_ok=True)
     model.save_pretrained(path)
     tokenizer.save_pretrained(path)
-    with open(os.path.join(path, "best_reward.txt"), "w") as f:
-        f.write(str(reward))
-    wandb.log({"best_reward": reward})
-    wandb.run.summary["best_reward"] = reward
+    best_rewards[func] = reward
+    with open(BEST_REWARD_FILE, "w") as f:
+        json.dump(best_rewards, f, indent=2)
+    wandb.log({"best_reward": reward, "best_reward_func": func})
     wandb.run.summary["best_model_path"] = path
-    return reward
+    return best_rewards
 
 
-def run_training_step(successful_rewrites, model, tokenizer, best_reward):
+def run_training_step(successful_rewrites, model, tokenizer, best_rewards):
     if len(successful_rewrites) < 4:
-        return best_reward
+        return best_rewards
 
     sources   = _read_sources(GENGIN)
     functions = find_functions(sources)
@@ -230,7 +260,7 @@ def run_training_step(successful_rewrites, model, tokenizer, best_reward):
         prompt_map[i] = (func, sources, functions)
 
     if not prompts:
-        return best_reward
+        return best_rewards
 
     dataset    = Dataset.from_list(prompts)
     reward_fn  = make_grpo_reward_fn(prompt_map)
@@ -260,10 +290,8 @@ def run_training_step(successful_rewrites, model, tokenizer, best_reward):
     trainer.train()
     trainer.save_model("./lora_checkpoints/latest")
 
-    avg_reward_in_batch = sum(r["reward"] for r in successful_rewrites) / len(successful_rewrites)
-    best_reward = save_best_model(model, tokenizer, avg_reward_in_batch, best_reward)
     successful_rewrites.clear()
-    return best_reward
+    return best_rewards
 
 
 RESPONSE_LOG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "responses.log")
@@ -284,6 +312,9 @@ def log_response(step, func, response_text, reward):
 
 
 if __name__ == "__main__":
+    restore_all()
+    BENCHMARK_STATS = measure_baseline()
+
     wandb.init(project="gengin-rl", config={
         "hf_model": HF_MODEL,
         "benchmark_baseline": BENCHMARK_STATS,
@@ -292,8 +323,8 @@ if __name__ == "__main__":
     model, tokenizer = load_lora_model()
 
     successful_rewrites = []
-    best_reward = load_best_reward()
-    print(f"Starting with best_reward = {best_reward:.4f}")
+    best_rewards = load_best_rewards()
+    print(f"Loaded per-function best rewards for {len(best_rewards)} function(s).")
     step = 0
 
     while True:
@@ -326,16 +357,22 @@ if __name__ == "__main__":
                 wandb.log({"step": step, "reward": -1.0, "bench_failed": True})
                 continue
 
-            reward = calculate_reward(bench_data)
+            response_tokens = len(tokenizer.tokenizer.encode(response_text))
+            reward = calculate_reward(bench_data, response_tokens)
             iteration_rewards.append(reward)
 
+            speedup = BENCHMARK_STATS["avg_ms"] / bench_data["avg_ms"] if bench_data["avg_ms"] > 0 else 0.0
             wandb.log({
-                "step":       step,
-                "reward":     reward,
-                "avg_ms":     bench_data["avg_ms"],
-                "median_ms":  bench_data["median_ms"],
-                "p99_ms":     bench_data["p99_ms"],
-                "is_correct": bench_data["frame_hashes"] == BENCHMARK_STATS["frame_hashes"],
+                "step":                          step,
+                "reward":                        reward,
+                "avg_ms":                        bench_data["avg_ms"],
+                "median_ms":                     bench_data["median_ms"],
+                "p99_ms":                        bench_data["p99_ms"],
+                "is_correct":                    bench_data["frame_hashes"] == BENCHMARK_STATS["frame_hashes"],
+                "speedup":                       speedup,
+                f"speedup/{func}":               speedup,
+                f"reward/{func}":                reward,
+                f"avg_ms/{func}":                bench_data["avg_ms"],
             })
 
             log_response(step, func, response_text, reward)
@@ -344,6 +381,7 @@ if __name__ == "__main__":
             if reward > 0.0:
                 print(f"Successful rewrite with reward {reward:.4f}.")
                 successful_rewrites.append({"response": response_text, "prompt": prompt, "reward": reward})
+                best_rewards = save_best_model(model, tokenizer, func, reward, best_rewards)
 
             step += 1
 
@@ -351,7 +389,6 @@ if __name__ == "__main__":
             iter_avg = sum(iteration_rewards) / len(iteration_rewards)
             print(f"Iteration average reward: {iter_avg:.4f} over {len(iteration_rewards)} functions")
             wandb.log({"iteration_avg_reward": iter_avg})
-            best_reward = save_best_model(model, tokenizer, iter_avg, best_reward)
 
         if len(successful_rewrites) >= 4 and step % 20 == 0:
-            best_reward = run_training_step(successful_rewrites, model, tokenizer, best_reward)
+            best_rewards = run_training_step(successful_rewrites, model, tokenizer, best_rewards)
